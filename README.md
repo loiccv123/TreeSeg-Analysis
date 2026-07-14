@@ -18,7 +18,7 @@ Python 3.x (laspy, Open3D, scikit-learn, scipy)
 R (lidR, VoxR, ITSMe, AdTree QSM, ArchiQSM)
 
 # Full instructions
-See docs/Instructions.docx for detailed setup and usage steps.
+See InstructionsEnglish.docx for detailed setup and usage steps.
 
 # Authors
 - Loïc Charlebois (loiccv123@gmail.com)
