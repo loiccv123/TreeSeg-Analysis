@@ -1,0 +1,2243 @@
+---
+title: "LiDAR Saint-Bruno Analysis Report"
+author: "Loïc Charlebois"
+date: "`r Sys.Date()`"
+params:
+  tree_file: ""
+  dir: ""
+  bloc_nub: ""
+  prev_year_file: ""
+output:
+  html_document: 
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+    fig_width: 5
+    fig_height: 5
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cleanup = TRUE)
+options(rgl.useNULL = TRUE) 
+
+library(lidR)
+library(ITSMe)
+library(openxlsx)
+library(aRchi)
+library(rgl)
+library(htmlwidgets)
+library(htmltools)
+library(VoxR)
+library(data.table)
+library(R.utils)
+library(webshot2)
+library(lidUrb)
+library(Morpho)
+library(R.utils)
+library(ggplot2)
+
+rgl::setupKnitr()
+rgl::clear3d()
+
+# Multicore
+library(future)
+library(data.table)
+plan(multisession, workers = parallel::detectCores())
+data.table::setDTthreads(0)
+Sys.setenv(RSTUDIO_PANDOC = "/usr/local/bin")
+
+# TAKES PARAMS FROM GENERATE_ALL_REPORTS.R
+current_file_name <- params$tree_file
+current_path <- params$dir
+bloc_nb <- params$bloc_nub
+full_las_path <- file.path(current_path, current_file_name)
+prev_year_file_path <- params$prev_year_file
+
+has_prev_year_comparison_file <- nzchar(prev_year_file_path) && file.exists(prev_year_file_path)
+if (has_prev_year_comparison_file) {
+  cat("Aligned previous-year file found:", basename(prev_year_file_path), "\n")
+} else {
+  cat("No aligned previous-year file – yearly comparison section will be skipped.\n")
+}
+############################################################################################
+#Variables to change
+output_dir_for_archi <- "/Users/loiccv/Documents/UQAM/RStudio_1st_project/Markdown/AdTreeQSMGen/Bloc_"
+output_dir_for_archi_qsm_files <- paste0(output_dir_for_archi, bloc_nb)
+treatment_list_csv_path <- "/Users/loiccv/Documents/UQAM/RStudio_1st_project/Markdown/treatment_list.csv"
+
+ad_tree_program_path <- "/Applications/AdTree.app/Contents/MacOS/AdTree"
+# You can download simple software like meshlab to view AdTree QSM .obj outputs (https://www.meshlab.net/)
+
+#### UNCOMMENT TO TEST INDIVIDUAL BLOCS IN THIS DOCUMENT #####
+# directory <- "/Users/loiccv/Documents/UQAM/LidarDataAnalysis/seg_trees_bloc3_for_html_report_non_downsampled"
+# current_file_name <- "205_ACSA_bloc2_mai_2025.laz"
+# full_las_path <- file.path(directory, current_file_name)
+
+show_rgl_axes <- FALSE  # Set to FALSE for a clean white background on the plots
+
+generate_archi_qsm <- TRUE # it generates it from adtree which gives better initial result
+generate_adtree_qsm <- TRUE
+
+# TOGGLE SECTIONS IN THE GRAPH
+toggle_summary_table <- TRUE
+toggle_analysis_plots <- TRUE
+toggle_pruning_1phase_plot <- TRUE
+toggle_pruning_3phase_plot <- TRUE
+toggle_spherical_dist_plot <- TRUE
+toggle_cone_density_plot <- TRUE
+toggle_voxr_plot <- TRUE
+toggle_yearly_comp_table <- TRUE
+toggle_yearly_comp_plot <- TRUE
+toggle_cone_growth_loss_plot <- TRUE
+toggle_adtree_plot <- FALSE # leave at false
+toggle_archi_qsm_plots <- TRUE
+toggle_elevation_angle_plot <- FALSE # was problems for now
+toggle_technical_details <- TRUE
+
+# Choose between images or 3d displayable graphs in HTML
+keep_pruning_zone_3Dplot <- FALSE
+keep_spherical3Dplot <- FALSE
+keep_voxel3Dplot <- FALSE
+keep_voxRyearComparison_3Dplot <- FALSE
+keep_conical3Dplot <- FALSE
+keep_adtree3Dplot <- FALSE
+keep_archi3Dplot <- FALSE
+
+# PREFERABLY DON'T MODIFY, IF THIS IS MODIFIED, NEED TO GO TO LINE 286
+voxelization_resolution_2_5cm <- 0.025
+voxelization_resolution_5cm <- 0.05
+voxelization_resolution_10cm <- 0.1
+voxelization_resolution_20cm <- 0.2
+voxelization_resolution <- c(voxelization_resolution_2_5cm,voxelization_resolution_5cm,voxelization_resolution_10cm,voxelization_resolution_20cm)
+
+aRchi_QSM_clean_treshold <- 0.4 # shouldn't be used for the moment
+
+# NEW PARAMETERS FOR ZONE CRITIQUE ARBRE ORNEMENTAL 
+wire_spacing <- 1.2      # Distance between center and side wires
+num_wires    <- 3        # Left, Center, Right
+dist_side_limit <- 2.0   # 2m from the OUTER wires
+dist_top_dome   <- 3.0   # 3m height (dome peak)
+dist_crit_depth <- 2.5   # 2.5m depth below wires (Critical Zone only)
+dist_approach   <- 0.6   # 0.6m radius around wires
+# cable_heights <- c(5, 6, 7, 8) 
+cable_heights <- c(6, 7, 8, 9, 10) 
+line_center_x <- 0
+line_center_y <- 0
+
+#Spherical distance metrics 
+visual_point_height <- 6.0 # For visual representation only, 5,6,7,8 are calculated as ratios
+x_min <- 0.0  #integral distance values of density from point
+x_max <- 3.0
+wireframe_sphere_radius <- x_max #m
+# point_height <- c(5,6,7,8)
+point_height <- c(6,7,8,9,10)
+
+# Cone parameters
+visual_cone_base_height <- 6.0 # For visual representation only, 5,6,7,8 are calculated as ratios
+cone_tip_x <- 0.0
+cone_tip_y <- 0.0
+cone_radius <- 3.0
+cone_height <- tan(pi/4) * cone_radius  # 3m in this case ( tan(pi/4) = 1 ) , to have a 45 degree angle * 2 = 90 degree cone angle
+visual_cone_tip_z <- visual_cone_base_height - cone_height
+
+# cone_base_z <- c(5,6,7,8)
+# cone_tip_z <- c(2,3,4,5) # cone base z minus cone_height that's 3m with a 3m radis
+
+cone_base_z <- c(6,7,8,9,10)
+cone_tip_z <- c(3,4,5,6,7)
+############################################################################################
+
+WD_list <- data.frame(
+  x = c("ACSA", "CASP", "CEOC", "GLTR", "PINI", "QUMA", "TICO", "ULAC"),
+  y = c(516.666667, 408.571429, 495, 616.25, 605.876478, 598.75, 422.94086, 561.87741)
+)
+
+TREATMENT_list <- read.csv(treatment_list_csv_path, stringsAsFactors = FALSE)
+
+parts <- strsplit(current_file_name, "_")[[1]]
+tree_id <- parts[1]
+tree_type <- parts[2]
+tree_treatment <- TREATMENT_list$treatment[TREATMENT_list$id == tree_id]
+densite_bois <- WD_list$y[WD_list$x == tree_type]
+
+if(!file.exists(full_las_path)) {
+  stop("File not found: ", full_las_path)
+}
+
+las <- lidR::readLAS(full_las_path)
+
+# TO TRACE THE FILTERS THAT WERE USED (The downside is the loss of resolution on small branches)
+# First on CloudCompare, a SOR and NOISE filter are used on the whole plantation, after the floor is removed
+# Then, in the segmentation python script, 3 succesive SOR filters are used 
+# Finally this last filter is applied
+# las = lidUrb::filter_noise(las,k = 6L,sigma = 0.8, keep_noise = FALSE)
+# lidR::plot(las,color="is.noise")
+# Nevermind, it seems a bit too high of filtering, the small branches are struggling to be reconstructed by QSM
+  
+# Find origin of tree (bottom centered base)
+X0 <- median(las@data$X)
+Y0 <- median(las@data$Y)
+Z0 <- min(las@data$Z)
+
+# Normalize data
+XYZ <- data.frame(X=las@data$X-X0, Y=las@data$Y-Y0, Z=las@data$Z-Z0)
+
+# Configure rgl for HTML output, should not require these, uncomment if RGL plots fail
+# knitr::knit_hooks$set(webgl = rgl::hook_webgl)
+# rgl::setupKnitr(autoprint = TRUE)
+
+rgl::clear3d()
+options(rgl.useNULL=TRUE)
+rgl::setupKnitr()
+```
+
+```{r ad-tree-qsm-gen, message=FALSE, warning=FALSE}
+AdTree_Biomass <- 0
+AdTree_DBH <- 0
+AdTree_Total_Tree_Length <- 0 
+
+if (generate_adtree_qsm) {
+  # Write XYZ data to a temporary file
+  base_name <- tools::file_path_sans_ext(current_file_name)
+  tree_filename <- paste0(base_name, ".xyz")
+  temp_xyz_file <- file.path(tempdir(), tree_filename)
+  
+  write.table(XYZ, temp_xyz_file, row.names = FALSE, col.names = FALSE, sep = " ")
+  
+  result <- system2("/Applications/AdTree.app/Contents/MacOS/AdTree",
+                    args = c(temp_xyz_file,
+                             output_dir_for_archi_qsm_files,
+                             "-s"),
+                    stdout = TRUE,
+                    stderr = TRUE)
+  
+  base_name <- tools::file_path_sans_ext(current_file_name)
+  obj_filename <- paste0(base_name, "_branches.obj")
+  obj_file <- file.path(output_dir_for_archi_qsm_files, obj_filename)
+  
+  mesh <- Morpho::obj2mesh(obj_file)
+  
+  # Safely attempt to build QSM
+  qsm <- tryCatch({
+    lidUrb::adtree2qsm(mesh)
+  }, error = function(e) {
+    message(paste("QSM generation skipped for", current_file_name, ":", e$message))
+    return(NULL)
+  })
+  
+  if (!is.null(qsm) && !is.null(qsm$DBH) && length(qsm$DBH) > 0) {
+    AdTree_DBH <- round(qsm$DBH * 100, 2) # cm
+    AdTree_Total_Tree_Length <- round(qsm$Length, 2) # m 
+    AdTree_Biomass <- round(qsm$Volume * densite_bois, 2) # kg
+  } else {
+    AdTree_DBH <- NA_real_
+    AdTree_Total_Tree_Length <- NA_real_
+    AdTree_Biomass <- NA_real_
+  }
+  
+  # Clean up temporary file
+  unlink(temp_xyz_file)
+}
+```
+
+```{r qsm-processing, message=FALSE, results='hide'}
+Rounded_Archi_Biomass <- 0
+
+### THIS IS NOT USED ANYMORE SINCE THE QSM IS FIRESTLY GENERATED BY ADTREE, THEN USED BY ARCHI
+if(FALSE) {
+  tryCatch({
+    
+    # Set timeout to 60 minutes (3600 seconds)
+    withTimeout({
+      My_PC <- build_aRchi(point_cloud = XYZ)
+      My_PC <- skeletonize_pc(My_PC)
+      My_PC <- smooth_skeleton(My_PC)
+      My_PC <- add_radius(My_PC)
+      My_PC <- Make_Path(My_PC)
+      My_PC_CLEAN <- Clean_QSM(XYZ, threshold = aRchi_QSM_clean_treshold, plotresult = FALSE)
+    }, timeout = 3600, onTimeout = "error")
+    
+    cat("QSM generation completed successfully for:", current_file_name, "\n")
+    
+  }, error = function(e) {
+    cat("QSM generation failed or timed out for:", current_file_name, "\n")
+    cat("Error:", e$message, "\n")
+    generate_archi_qsm <<- FALSE
+  })
+  Archi_Biomass <- TreeBiomass(XYZ, WoodDensity = densite_bois, level = 'Tree')
+  Rounded_Archi_Biomass <- round(Archi_Biomass, 2)
+} else {
+  Rounded_Archi_Biomass <- 'Archi QSM disabled'
+}
+```
+
+```{r ad-tree-to-archi-qsm, message=FALSE, results='hide'}
+# This is all fucked up now, need to access a backup version to get old QSMs 
+# This code didn't work because AdTree doesn't have the axis_ID main trunk or the branching order
+if(FALSE) {
+  Rounded_Archi_Biomass <- 0
+  
+  if(!exists("My_aRchi")) My_aRchi <- NULL 
+  
+  if (generate_archi_qsm) {
+    Rounded_Archi_Biomass <- "Error-time limit"
+    Archi_Volume <- NA
+    Archi_DAI <- NA
+    Archi_ForkRate <- NA
+  
+    result <- tryCatch({
+      R.utils::withTimeout({
+        qsm_data <- qsm$QSM
+        required_cols <- c("startX", "startY", "startZ", "endX", "endY", "endZ", 
+                           "radius_cyl", "length", "branching_order", "axis_ID")
+        qsm_data <- qsm_data[, ..required_cols]
+        data.table::setnames(qsm_data, "radius_cyl", "radius")
+  
+        QSM_for_aRchi <- list(model = "treeQSM", QSM = qsm_data)
+        My_aRchi <- aRchi::build_aRchi(QSM = QSM_for_aRchi, point_cloud = XYZ)
+        My_aRchi <- skeletonize_pc(My_aRchi)
+        My_aRchi <- add_radius(My_aRchi)
+        My_aRchi <- Make_Path(My_aRchi)
+        
+        # Compute metrics
+        Archi_Biomass <- aRchi::TreeBiomass(My_aRchi, WoodDensity = densite_bois, level = "Tree")
+        Rounded_Archi_Biomass <<- round(Archi_Biomass, 2)
+        Archi_Volume <<- aRchi::TreeVolume(My_aRchi)     
+        Archi_DAI <<- aRchi::DAI(My_aRchi)               
+        Archi_ForkRate <<- aRchi::ForkRate(My_aRchi)     
+        
+        ### Trimming influences LECIGNE ET AL 2022 ARTICLE REPRODUCTION ###
+        current_qsm <- My_aRchi@QSM
+        
+        # Calculate stats per AXIS
+        axis_stats <- current_qsm[, .(
+          axis_len = sum(length),
+          b_order = unique(branching_order),
+          startX = startX[1], startY = startY[1], startZ = startZ[1],
+          endX = endX[.N], endY = endY[.N], endZ = endZ[.N]
+        ), by = axis_ID]
+        
+        # Identify Structuring Axes
+        axis_stats[, is_structuring := (b_order %in% c(0, 1, 2)) & (axis_len > 1.0)]
+        
+        # Calculate Zenith Angle
+        axis_stats[, dx := endX - startX]
+        axis_stats[, dy := endY - startY]
+        axis_stats[, dz := endZ - startZ]
+        axis_stats[, straight_dist := sqrt(dx^2 + dy^2 + dz^2)]
+        
+        # Angle Calculation
+        axis_stats[, zenith_angle := acos(dz / straight_dist) * (180 / pi)]
+        axis_stats[is.nan(zenith_angle), zenith_angle := 0]
+        
+        # Classification
+        axis_stats[, Classification := ifelse(is_structuring, "Retained", "Discarded")]
+        
+        # Merge back to the QSM table safely
+        current_qsm[axis_stats, on = "axis_ID", 
+                    `:=`(Classification = i.Classification, 
+                         zenith_angle = i.zenith_angle)]
+        
+        My_aRchi@QSM <- current_qsm
+        
+        My_aRchi <<- My_aRchi 
+        
+      }, timeout = 300, onTimeout = "error")
+      
+    }, error = function(e) {
+      message("Error in QSM generation: ", e$message)
+      Rounded_Archi_Biomass <<- e$message
+    })
+    
+  } else {
+    Rounded_Archi_Biomass <- "Archi QSM disabled"
+  }
+}
+
+
+#### NEW CODE TESTED NOW
+Rounded_Archi_Biomass <- 0
+
+if(!exists("My_aRchi")) My_aRchi <- NULL 
+
+if (generate_archi_qsm) {
+  Rounded_Archi_Biomass <- "Error-time limit"
+  Archi_Volume <- NA
+  Archi_DAI <- NA
+  Archi_ForkRate <- NA
+
+  result <- tryCatch({
+    R.utils::withTimeout({
+      
+      # FIX: Build aRchi natively from the Point Cloud.
+      # Because AdTree doesn't output topology (branching_order, axis_ID),
+      # we let aRchi build the skeleton and paths to generate these required metrics.
+      
+      My_aRchi <- aRchi::build_aRchi(point_cloud = XYZ)
+      My_aRchi <- aRchi::skeletonize_pc(My_aRchi)
+      My_aRchi <- aRchi::add_radius(My_aRchi)
+      My_aRchi <- aRchi::Make_Path(My_aRchi) # This step calculates branching_order & axis_ID
+      
+      # Compute metrics
+      Archi_Biomass <- aRchi::TreeBiomass(My_aRchi, WoodDensity = densite_bois, level = "Tree")
+      Rounded_Archi_Biomass <<- round(Archi_Biomass, 2)
+      Archi_Volume <<- aRchi::TreeVolume(My_aRchi)     
+      Archi_DAI <<- aRchi::DAI(My_aRchi)               
+      Archi_ForkRate <<- aRchi::ForkRate(My_aRchi)     
+      
+      ### Trimming influences LECIGNE ET AL 2022 ARTICLE REPRODUCTION ###
+      current_qsm <- My_aRchi@QSM
+      
+      # Calculate stats per AXIS
+      axis_stats <- current_qsm[, .(
+        axis_len = sum(length),
+        b_order = unique(branching_order),
+        startX = startX[1], startY = startY[1], startZ = startZ[1],
+        endX = endX[.N], endY = endY[.N], endZ = endZ[.N]
+      ), by = axis_ID]
+      
+      # Identify Structuring Axes
+      axis_stats[, is_structuring := (b_order %in% c(0, 1, 2)) & (axis_len > 1.0)]
+      
+      # Calculate Zenith Angle
+      axis_stats[, dx := endX - startX]
+      axis_stats[, dy := endY - startY]
+      axis_stats[, dz := endZ - startZ]
+      axis_stats[, straight_dist := sqrt(dx^2 + dy^2 + dz^2)]
+      
+      # Angle Calculation
+      axis_stats[, zenith_angle := acos(dz / straight_dist) * (180 / pi)]
+      axis_stats[is.nan(zenith_angle), zenith_angle := 0]
+      
+      # Classification
+      axis_stats[, Classification := ifelse(is_structuring, "Retained", "Discarded")]
+      
+      # Merge back to the QSM table safely
+      current_qsm[axis_stats, on = "axis_ID", 
+                  `:=`(Classification = i.Classification, 
+                       zenith_angle = i.zenith_angle)]
+      
+      My_aRchi@QSM <- current_qsm
+      
+      My_aRchi <<- My_aRchi 
+      
+    }, timeout = 300, onTimeout = "error")
+    
+  }, error = function(e) {
+    message("Error in QSM generation: ", e$message)
+    Rounded_Archi_Biomass <<- e$message
+  })
+  
+} else {
+  Rounded_Archi_Biomass <- "Archi QSM disabled"
+}
+```
+
+```{r its-me-calculations}
+height_simple <- round(max(XYZ$Z) - min(XYZ$Z), 2)
+computed_height <- ITSMe::tree_height_pc(pc = XYZ, plot = FALSE)
+rounded_height <- round(computed_height[1]$h, 2)
+ItsME_crown_pcs <- ITSMe::classify_crown_pc(pc = XYZ, plot = FALSE, thresholdbranch = 1, minheight = 1, buttress = FALSE)
+# alpha_volume <- ITSMe::alpha_volume_pc(pc = XYZ, plot = FALSE, alpha = 1)
+temp_DBH <- ITSMe::dbh_pc(pc = XYZ, plot = FALSE)
+ItsME_DBH <- round(temp_DBH[1]$dbh * 100, 2) # Conversion en cm
+trunk_height <- ITSMe::tree_height_pc(pc = ItsME_crown_pcs$trunkpoints, plot = FALSE)
+trunk_height <- ( round(trunk_height[1]$h, 2) )
+crown_height <- rounded_height - trunk_height
+```
+
+```{r voxR-calculations, message=FALSE, warning=FALSE}
+voxel_2_5cm <- VoxR::vox(XYZ, res = voxelization_resolution_2_5cm)
+voxel_5cm <- VoxR::vox(XYZ, res = voxelization_resolution_5cm)
+voxel_10cm <- VoxR::vox(XYZ, res = voxelization_resolution_10cm)
+voxel_20cm <- VoxR::vox(XYZ, res = voxelization_resolution_20cm)
+
+vox_matrices_diff_sizes <- list() 
+
+vox_matrices_diff_sizes[[1]] <- voxel_2_5cm
+vox_matrices_diff_sizes[[2]] <- voxel_5cm
+vox_matrices_diff_sizes[[3]] <- voxel_10cm
+vox_matrices_diff_sizes[[4]] <- voxel_20cm
+
+total_voxel_count <- c(0,0,0,0)
+total_voxel_count[1] <- nrow(voxel_2_5cm)
+total_voxel_count[2] <- nrow(voxel_5cm)
+total_voxel_count[3] <- nrow(voxel_10cm)
+total_voxel_count[4] <- nrow(voxel_20cm)
+
+voxR_metrics <- VoxR::tree_metrics(XYZ)
+voxR_height <- round(voxR_metrics$height, 2)
+voxR_DBH <- round(voxR_metrics$DBH * 100, 2) # cm
+voxR_biomass <- round(voxR_metrics$volume * densite_bois / 1000, 2) # kg # This is the volume of a 3d convex hull, it's not exactly what we want:
+#https://github.com/Blecigne/VoxR/blob/Blecigne/VoxR/R/crown_metrics.R#L125https://www.rdocumentation.org/pack#ages/geometry/versions/0.5.1/topics/convhulln
+# It doesn't seem to specify the units
+voxR_crown_diam <- round(voxR_metrics[["crown_diameter"]][["circle_fitting"]], 2)
+voxR_proj_area <- round(voxR_metrics$crown_projected_area, 2)
+```
+
+## | `r current_file_name` | `r tree_treatment`
+
+### Metrics Summary Table
+
+```{r summary-table, message=FALSE, warning=FALSE}
+if (toggle_summary_table) {
+  summary_data <- data.frame(
+    Metric = c("Tree Height","Trunk Height", "Crown Height","ItsME DBH", "voxR DBH", "Crown Diameter", "Crown Proj Area", "Voxel Biomass",  "Archi Biomass", "AdTree Biomass"),
+    Value = c(paste(rounded_height, "m"), 
+             paste(trunk_height, "m"),
+             paste(crown_height, "m"),
+             paste(ItsME_DBH, "cm"),
+             paste(voxR_DBH, "cm"),
+             paste(voxR_crown_diam,"m"),
+             paste(voxR_proj_area, "m^2"),
+             paste(voxR_biomass, "kg"),
+             paste(Rounded_Archi_Biomass, "kg"),
+             paste(AdTree_Biomass, "kg")),
+             stringsAsFactors = FALSE
+  )
+  
+  knitr::kable(summary_data, 
+               align = c("l", "r"))
+}
+```
+
+### ITSMe Analysis Plots
+
+```{r analysis-plots, fig.width=6, fig.height=4, fig.show='hold', message=FALSE, warning=FALSE}
+if (toggle_analysis_plots) {
+  # Set up 2x2 layout for 4 plots side by side
+  # par(mfrow = c(2, 2))
+  
+  # For now, not necessary to show, the classify crown does it pretty much
+  # result_height <- ITSMe::tree_height_pc(pc = XYZ, plot = TRUE)
+  
+  ItsME_crown_pcs <- NULL
+  tryCatch({
+    ItsME_crown_pcs <- ITSMe::classify_crown_pc(
+      pc = XYZ, plot = TRUE,
+      thresholdbranch = 1, minheight = 1, buttress = FALSE
+    )
+    # 
+    result_dbh <- ITSMe::dbh_pc(pc = XYZ, plot = FALSE)
+  }, error = function(e) {
+    message(paste("An unexpected error occurred in ITSMe::classify_crown_pc for tree:", tree_name))
+    message("Original error: ", e$message)
+  })
+  # par(mfrow = c(1, 1))
+}
+```
+
+<!-- ### Alpha Volume Plot this doesn't work for some reason, would have been nice--> 
+```{r volume-plot, message=FALSE, warning=FALSE}
+# rgl::clear3d()
+# points3d(XYZ$X, XYZ$Y, XYZ$Z, color = "red", size = 2)
+# plot(alpha_volume$alphashape3d)
+# aspect3d("iso")
+# axes3d()
+# bg3d("white")
+# rgl::rglwidget()
+# rgl::clear3d()
+```
+
+### Critical Pruning Zone From Voxel
+
+```{r pruning_zone_density_eval_1phase, message=FALSE, warning=FALSE}
+nb_voxels_1phase_in_crit_pruning_zone_at_height <- matrix(0, nrow=4, ncol=5)
+
+# Variables for visualization (Store data from i=2, 5cm resolution)
+visual_voxels_all <- NULL
+visual_voxels_in  <- NULL
+visual_cable_z    <- 0
+
+# --- 1-PHASE DIMENSIONS ---
+dist_side_limit  <- 2.0  # Cylinder radius
+dist_top_limit   <- 3.0  # Sphere radius (Now used for BOTH top and bottom)
+dist_approach    <- 0.6  # Inner red zone radius
+
+for(i in 1:4) {
+  vox_matrix <- vox_matrices_diff_sizes[[i]]
+  tls_voxels <- data.table::data.table(X = vox_matrix$x, Y = vox_matrix$y, Z = vox_matrix$z)
+  
+  for(j in 1:5) {
+    current_cable_z <- cable_heights[j]
+    
+    # --- GEOMETRY CALCULATION (1-Wire / Silo Shape) ---
+    
+    # 1. Transform to local coordinates relative to the SINGLE wire center
+    dx <- tls_voxels$X - line_center_x
+    dy <- tls_voxels$Y - line_center_y
+    dz <- tls_voxels$Z - current_cable_z
+    
+    # 2. Horizontal Radial Distance (Cylindrical Radius)
+    d_xy <- sqrt(dx^2 + dy^2)
+    
+    # 3. 3D Radial Distance (Spherical Radius - for top and bottom)
+    d_xyz <- sqrt(dx^2 + dy^2 + dz^2)
+    
+    # 4. Define the Critical Zone (Blue)
+    # - Horizontal constraint: Must be within 2m radius (Cylinder walls).
+    # - Spherical constraint: Must be within 3m 3D radius (Caps top & bottom).
+    
+    is_within_side   <- (d_xy <= dist_side_limit)
+    is_within_sphere <- (d_xyz <= dist_top_limit)
+    
+    # Combine
+    is_inside_critical <- is_within_side & is_within_sphere
+    
+    # 5. Statistics
+    count_inside <- sum(is_inside_critical, na.rm = TRUE)
+    nb_voxels_1phase_in_crit_pruning_zone_at_height[i, j] <- count_inside
+  
+    
+    # Store for visualization (using 5cm resolution i=2 and 6m height j=1) # updated with new heights
+    if(i == 2 && j == 1) { 
+      visual_voxels_all <- tls_voxels
+      visual_voxels_in  <- which(is_inside_critical)
+      visual_cable_z    <- current_cable_z
+    }
+  }
+}
+```
+
+Pruning zone 1 phase voxel count at cable height `r cable_heights[1]` m (5m resolution): `r nb_voxels_1phase_in_crit_pruning_zone_at_height[2,1]` voxels <br>
+Pruning zone 1 phase voxel count at cable height `r cable_heights[2]` m (5cm resolution): `r nb_voxels_1phase_in_crit_pruning_zone_at_height[2,2]` voxels <br>
+Pruning zone 1 phase voxel count at cable height `r cable_heights[3]` m (5cm resolution): `r nb_voxels_1phase_in_crit_pruning_zone_at_height[2,3]` voxels <br>
+Pruning zone 1 phase voxel count at cable height `r cable_heights[4]` m (5cm resolution): `r nb_voxels_1phase_in_crit_pruning_zone_at_height[2,4]` voxels <br>
+Pruning zone 1 phase voxel count at cable height `r cable_heights[5]` m (5cm resolution): `r nb_voxels_1phase_in_crit_pruning_zone_at_height[2,5]` voxels <br>
+
+```{r pruning_zone_density_plotting_1phase, results='asis', message=FALSE, warning=FALSE}
+if (toggle_pruning_1phase_plot) {
+  rgl::clear3d()
+  
+  # 1. Plot Context (Green)
+  points3d(visual_voxels_all$X, visual_voxels_all$Y, visual_voxels_all$Z, col="green", size=3, alpha=0.3)
+  
+  # 2. Plot Critical Zone Voxels (Red)
+  if (length(visual_voxels_in) > 0) {
+    conflict_pts <- visual_voxels_all[visual_voxels_in, ]
+    points3d(conflict_pts$X, conflict_pts$Y, conflict_pts$Z, col="red", size=5)
+  }
+  
+  # --- DRAWING THE WIREFRAME (1-Phase Symmetrical Silo Shape) ---
+  cx <- line_center_x
+  cy <- line_center_y
+  cz <- visual_cable_z
+  
+  # Helper to draw a circle at a specific Z
+  draw_circle <- function(z_level, r, col="blue") {
+    theta <- seq(0, 2*pi, length.out=64)
+    x_c <- cx + r * cos(theta)
+    y_c <- cy + r * sin(theta)
+    lines3d(x_c, y_c, rep(z_level, 64), col=col, lwd=2)
+  }
+  
+  # 1. Intersection Rings (Where Cylinder hits Top/Bottom Sphere)
+  # The cylinder (R=2) hits the Sphere (R=3) at height: z = +/- sqrt(3^2 - 2^2) = +/- sqrt(5) approx 2.236m
+  h_intersect <- sqrt(dist_top_limit^2 - dist_side_limit^2)
+  draw_circle(cz + h_intersect, dist_side_limit, "blue") # Top ring
+  draw_circle(cz - h_intersect, dist_side_limit, "blue") # Bottom ring
+  
+  # 2. Vertical Pillars (Cylinder Walls)
+  # Draw 8 vertical lines around the cylinder
+  angles <- seq(0, 2*pi, length.out=9)[-9]
+  for(ang in angles) {
+    wx <- cx + dist_side_limit * cos(ang)
+    wy <- cy + dist_side_limit * sin(ang)
+    
+    # Line from Bottom Ring (-2.236) to Top Ring (+2.236)
+    segments3d(c(wx, wx), c(wy, wy), c(cz - h_intersect, cz + h_intersect), col="blue", lwd=2)
+  }
+  
+  # 3. Top and Bottom Domes (Spherical Caps)
+  # We draw arches from the intersection rings up to the peak (+3m) and down to the trough (-3m)
+  for(ang in angles) {
+    # Top dome
+    z_vals_top <- seq(h_intersect, dist_top_limit, length.out=10)
+    r_vals_top <- sqrt(dist_top_limit^2 - z_vals_top^2) 
+    
+    lx_top <- cx + r_vals_top * cos(ang)
+    ly_top <- cy + r_vals_top * sin(ang)
+    lz_top <- cz + z_vals_top
+    lines3d(lx_top, ly_top, lz_top, col="blue", lwd=2)
+    
+    # Bottom dome
+    z_vals_bot <- seq(-h_intersect, -dist_top_limit, length.out=10)
+    r_vals_bot <- sqrt(dist_top_limit^2 - z_vals_bot^2) 
+    
+    lx_bot <- cx + r_vals_bot * cos(ang)
+    ly_bot <- cy + r_vals_bot * sin(ang)
+    lz_bot <- cz + z_vals_bot
+    lines3d(lx_bot, ly_bot, lz_bot, col="blue", lwd=2)
+  }
+  # Draw the very top and bottom points
+  points3d(cx, cy, cz + dist_top_limit, col="blue", size=5)
+  points3d(cx, cy, cz - dist_top_limit, col="blue", size=5)
+  
+  # --- APPROACH ZONE (The 1 Wire - Red) ---
+  # Red sphere/tube at center
+  spheres3d(cx, cy, cz, radius=dist_approach, col="red", alpha=0.5)
+  # Draw a small tube representing the wire line direction (X-axis)
+  lines3d(c(cx-2, cx+2), c(cy, cy), c(cz, cz), col="black", lwd=3)
+  
+  
+  if (keep_pruning_zone_3Dplot) {
+    widget <- div(
+      tags$h4("Critical Zone 1 phase at cable height ", visual_cable_z, " m"),
+      rgl::rglwidget(width = 500, height = 500)
+    )
+    rgl::clear3d()
+    widget
+  
+  } else {
+    plot3d_file <- tempfile(fileext = ".png")
+    rgl::snapshot3d(plot3d_file, width = 500, height = 500)
+    rgl::clear3d()
+  
+    htmltools::div(
+      htmltools::h4("Critical Zone 1 phase at cable height ", visual_cable_z, " m"),
+      htmltools::div(
+         style = "display: flex; flex-direction: row;",
+         htmltools::tags$img(src = knitr::image_uri(plot3d_file), style="width: 50%;"),
+         htmltools::tags$img(src = knitr::image_uri("arbre_ornemental_1phase.png"), style="width: 50%; object-fit: contain;"),
+      )
+    )
+  }
+}
+```
+
+```{r pruning_zone_density_eval_3phase, message=FALSE, warning=FALSE}
+# Initialize MATRICES (4 sizes x 4 heights)
+nb_voxels_3phase_in_crit_pruning_zone_at_height <- matrix(0, nrow=4, ncol=5)
+
+# Variables for visualization (Store data from i=2, 5cm resolution)
+visual_voxels_all <- NULL
+visual_voxels_in  <- NULL
+visual_cable_z    <- 0
+
+# --- 3-PHASE DIMENSIONS ---
+wire_spacing    <- 1.2   # Distance from center wire to outer wires (x-axis)
+dist_side_limit <- 2.0   # Horizontal distance limit from outer wires
+dist_top_limit  <- 3.0   # 3D Capsule radius (Used for BOTH Top AND Bottom)
+dist_approach   <- 0.6   # Inner red zone radius
+
+for(i in 1:4) {
+  vox_matrix <- vox_matrices_diff_sizes[[i]]
+  tls_voxels <- data.table::data.table(X = vox_matrix$x, Y = vox_matrix$y, Z = vox_matrix$z)
+  
+  for(j in 1:5) {
+    current_cable_z <- cable_heights[j]
+    
+    # --- GEOMETRY CALCULATION (3-Wire "Stadium Capsule" Shape) ---
+    
+    # 1. Transform to local coordinates relative to center wire
+    dx <- tls_voxels$X - line_center_x
+    dy <- tls_voxels$Y - line_center_y
+    dz <- tls_voxels$Z - current_cable_z
+    
+    # 2. Calculate Distance to the "Wire Segment"
+    # The wires form a line segment from x=-0.6 to x=+0.6 along the X-axis.
+    # Clamp the x-projection to the segment range [-0.6, 0.6]
+    clamped_x <- pmax(-wire_spacing, pmin(wire_spacing, dx))
+    
+    # Horizontal distance from voxel to the clamped point on the segment
+    d_segment_xy <- sqrt((dx - clamped_x)^2 + dy^2)
+    
+    # 3D distance from voxel to the clamped point on the segment (For top AND bottom caps)
+    d_segment_xyz <- sqrt((dx - clamped_x)^2 + dy^2 + dz^2)
+    
+    # 3. Define the Critical Zone (Blue)
+    # - Horizontal constraint: Must be within 2m radius from segment walls.
+    # - 3D Capsule constraint: Must be within 3m 3D radius from segment (Caps top & bottom).
+    
+    is_within_side   <- (d_segment_xy <= dist_side_limit)
+    is_within_radius <- (d_segment_xyz <= dist_top_limit)
+    
+    # Combine (Critical Zone)
+    is_inside_critical <- is_within_side & is_within_radius
+    
+    # 4. Statistics
+    count_inside <- sum(is_inside_critical, na.rm = TRUE)
+    nb_voxels_3phase_in_crit_pruning_zone_at_height[i, j] <- count_inside
+  
+    
+    # Store for visualization (using 5cm resolution i=2 and 6m height j=1) # updated with new heights
+    if(i == 2 && j == 1) { 
+      visual_voxels_all <- tls_voxels
+      visual_voxels_in  <- which(is_inside_critical)
+      visual_cable_z    <- current_cable_z
+    }
+  }
+}
+```
+
+Pruning zone 3 phase voxel count at cable height `r cable_heights[1]` m (5m resolution):  `r nb_voxels_3phase_in_crit_pruning_zone_at_height[2,1]` voxels <br>
+Pruning zone 3 phase voxel count at cable height `r cable_heights[2]` m (5cm resolution):  `r nb_voxels_3phase_in_crit_pruning_zone_at_height[2,2]` voxels <br>
+Pruning zone 3 phase voxel count at cable height `r cable_heights[3]` m (5cm resolution):  `r nb_voxels_3phase_in_crit_pruning_zone_at_height[2,3]` voxels <br>
+Pruning zone 3 phase voxel count at cable height `r cable_heights[4]` m (5cm resolution):  `r nb_voxels_3phase_in_crit_pruning_zone_at_height[2,4]` voxels <br>
+Pruning zone 3 phase voxel count at cable height `r cable_heights[5]` m (5cm resolution):  `r nb_voxels_3phase_in_crit_pruning_zone_at_height[2,5]` voxels <br>
+
+```{r pruning_zone_density_plotting_3phase, results='asis', message=FALSE, warning=FALSE}
+if (toggle_pruning_3phase_plot) {
+  rgl::clear3d()
+  
+  # 1. Plot Context (Green)
+  points3d(visual_voxels_all$X, visual_voxels_all$Y, visual_voxels_all$Z, col="green", size=3, alpha=0.3)
+  
+  # 2. Plot Critical Zone Voxels (Red)
+  if (length(visual_voxels_in) > 0) {
+    conflict_pts <- visual_voxels_all[visual_voxels_in, ]
+    points3d(conflict_pts$X, conflict_pts$Y, conflict_pts$Z, col="red", size=5)
+  }
+  
+  # --- DRAWING THE WIREFRAME (Stadium Symmetrical Capsule Shape) ---
+  cx <- line_center_x
+  cy <- line_center_y
+  cz <- visual_cable_z
+  
+  # Helper to draw the "Stadium" profile at a specific Z
+  draw_stadium_profile <- function(z_level, expansion_r, col="blue") {
+    theta <- seq(-pi/2, pi/2, length.out=32)
+    x_r <- cx + wire_spacing + expansion_r * cos(theta)
+    y_r <- cy + expansion_r * sin(theta)
+    x_l <- cx - wire_spacing + expansion_r * cos(theta + pi)
+    y_l <- cy + expansion_r * sin(theta + pi)
+    lines3d(c(x_r, rev(x_l), x_r[1]), c(y_r, rev(y_l), y_r[1]), rep(z_level, length(x_r)*2 + 1), col=col, lwd=2)
+  }
+  
+  # 1. Intersection Rings (Where horizontal limits hit the 3D capsule)
+  # Stadium (R=2) hits Capsule (R=3) at height: z = +/- sqrt(3^2 - 2^2) = +/- sqrt(5) approx 2.236m
+  h_intersect <- sqrt(dist_top_limit^2 - dist_side_limit^2)
+  draw_stadium_profile(cz + h_intersect, dist_side_limit, "blue") # Top ring
+  draw_stadium_profile(cz - h_intersect, dist_side_limit, "blue") # Bottom ring
+  
+  # 2. Vertical Pillars (Connecting the straight edges of the rings)
+  for(x_pos in c(-wire_spacing, wire_spacing)) {
+    # Corrected segments3d call: interleaving start and end points into single x, y, z vectors
+    segments3d(
+      x = c(cx + x_pos, cx + x_pos, cx + x_pos, cx + x_pos),
+      y = c(cy - dist_side_limit, cy - dist_side_limit, cy + dist_side_limit, cy + dist_side_limit),
+      z = c(cz - h_intersect, cz + h_intersect, cz - h_intersect, cz + h_intersect),
+      col = "blue", lwd = 2
+    )
+  }
+  
+  # Vertical pillars for the outer extrema curves
+  segments3d(
+    x = c(cx - wire_spacing - dist_side_limit, cx - wire_spacing - dist_side_limit, cx + wire_spacing + dist_side_limit, cx + wire_spacing + dist_side_limit),
+    y = c(cy, cy, cy, cy),
+    z = c(cz - h_intersect, cz + h_intersect, cz - h_intersect, cz + h_intersect),
+    col = "blue", lwd = 2
+  )
+  
+  
+  # 3. Top and Bottom Domes (Capsule curves)
+  # Draw longitudinal center ridges
+  lines3d(c(cx-wire_spacing, cx+wire_spacing), c(cy, cy), c(cz+dist_top_limit, cz+dist_top_limit), col="blue", lwd=2)
+  lines3d(c(cx-wire_spacing, cx+wire_spacing), c(cy, cy), c(cz-dist_top_limit, cz-dist_top_limit), col="blue", lwd=2)
+  
+  # Cross-sectional arches for the straight central body
+  for(x_off in c(-wire_spacing, 0, wire_spacing)) {
+    y_vals <- seq(-dist_side_limit, dist_side_limit, length.out=32)
+    z_vals_top <- cz + sqrt(dist_top_limit^2 - y_vals^2)
+    z_vals_bot <- cz - sqrt(dist_top_limit^2 - y_vals^2)
+    lines3d(rep(cx + x_off, 32), cy + y_vals, z_vals_top, col="blue", lwd=2)
+    lines3d(rep(cx + x_off, 32), cy + y_vals, z_vals_bot, col="blue", lwd=2)
+  }
+  
+  # Spherical end caps matching the stadium curves
+  theta_endcap <- seq(-pi/2, pi/2, length.out=9)
+  for(t in theta_endcap) {
+    r_vals <- seq(dist_side_limit, 0, length.out=10)
+    z_off <- sqrt(dist_top_limit^2 - r_vals^2) 
+    
+    # Right Endcap
+    x_r <- cx + wire_spacing + r_vals * cos(t)
+    y_r <- cy + r_vals * sin(t)
+    lines3d(x_r, y_r, cz + z_off, col="blue", lwd=2) # Top Right
+    lines3d(x_r, y_r, cz - z_off, col="blue", lwd=2) # Bottom Right
+    
+    # Left Endcap
+    x_l <- cx - wire_spacing - r_vals * cos(t)
+    y_l <- cy + r_vals * sin(t)
+    lines3d(x_l, y_l, cz + z_off, col="blue", lwd=2) # Top Left
+    lines3d(x_l, y_l, cz - z_off, col="blue", lwd=2) # Bottom Left
+  }
+  
+  
+  # --- APPROACH ZONES (The 3 Wires - Red) ---
+  # Draw 3 cylinders/circles for the wires
+  for(w_x in c(-wire_spacing, 0, wire_spacing)) {
+    # Red exclusion zone
+    spheres3d(cx + w_x, cy, cz, radius=dist_approach, col="red", alpha=0.5)
+  }
+  # Line representing the wire segment 
+  lines3d(c(cx-wire_spacing-2, cx+wire_spacing+2), c(cy, cy), c(cz, cz), col="black", lwd=3)
+  
+  
+  if (keep_pruning_zone_3Dplot) {
+    widget <- div(
+      tags$h4("Critical Zone 3 phase at cable height ", visual_cable_z, " m (la zone de dégagement en bas n'est pas comptabilisé) "),
+      rgl::rglwidget(width = 500, height = 500)
+    )
+    rgl::clear3d()
+    widget
+  
+  } else {
+    plot3d_file <- tempfile(fileext = ".png")
+    rgl::snapshot3d(plot3d_file, width = 500, height = 500)
+    rgl::clear3d()
+  
+    htmltools::div(
+      htmltools::h4("Critical Zone 3 Phase at Cable Height ", visual_cable_z, " m (la zone de dégagement en bas n'est pas comptabilisé)"),
+      htmltools::div(
+         style = "display: flex; flex-direction: row;",
+         htmltools::tags$img(src = knitr::image_uri(plot3d_file), style="width: 50%;"),
+         htmltools::tags$img(src = knitr::image_uri("arbre_ornemental.png"), style="width: 50%; object-fit: contain;"),
+      )
+    )
+  }
+}
+```
+
+### Spherical Distance From Voxel
+
+```{r spherical-distance-analysis, results='asis', message=FALSE, warning=FALSE}
+# Initialize a numeric vector to store the results for each height.
+spherical_ratio <- matrix(0, nrow=4, ncol=5)
+spherical_voxel_counts <- matrix(0, nrow=4, ncol=5)
+
+# Variables to store the data for the specific visual plot
+visual_density_result <- NULL
+visual_x_range <- NULL
+visual_y_range <- NULL
+visual_tls <- NULL
+visual_integral_value <- 0
+visual_spherical_ratio <- 0
+
+# Loop for the different voxel sizes
+for(i in 1:4) {
+# --- Loop to calculate the ratio for all 4 heights ---
+  for(j in 1:5) {
+    vox_matrix <- vox_matrices_diff_sizes[[i]]
+    tls <- data.table::data.table(X = vox_matrix$x, Y = vox_matrix$y, Z = vox_matrix$z)
+    tls[, dist := VoxR::point_distance(tls, c(0, 0, point_height[j]))]
+    
+    # Absolute amount of voxels in sphere
+    count_inside <- sum(tls$dist >= x_min & tls$dist <= x_max)
+    spherical_voxel_counts[i, j] <- count_inside
+    percentage <- (count_inside / nrow(tls)) * 100
+    spherical_ratio[i, j] <- round(percentage, 2)
+    
+    tls[, color_dist := round(dist * 100)]
+    
+    # Calculate Density (Moved up because it is needed for the integral check below)
+    dist_original <- tls$dist
+    density_result <- density(dist_original)
+    
+    # Find the indices within the specified integration range
+    indices <- which(density_result$x >= x_min & density_result$x <= x_max)
+    x_range <- NULL
+    y_range <- NULL
+    if(length(indices) > 0) {
+      x_range <- density_result$x[indices]
+      y_range <- density_result$y[indices]
+    }
+    
+    # Calculate the integral using the trapezoidal rule
+    integral_value <- 0
+    if (length(x_range) > 1) {
+      integral_value <- sum(diff(x_range) * (y_range[-1] + y_range[-length(y_range)])) / 2
+    }
+    
+    # If this is the specific resolution (i=2) (5cm) and height we want for the visual plot
+    if(i == 2 && point_height[j] == visual_point_height) {
+      visual_density_result <- density_result
+      visual_x_range <- x_range
+      visual_y_range <- y_range
+      visual_tls <- tls 
+      visual_integral_value <- integral_value
+      visual_spherical_ratio <- spherical_ratio[i, j]
+    }
+  }
+}
+```
+  
+Integration range: [`r x_min`, `r x_max` ] <br>
+Integral Value (area under curve) at point height of `r visual_point_height` m: `r visual_integral_value`<br>
+Spherical Voxel Count at point height of `r point_height[1]` m (5cm resolution): `r spherical_voxel_counts[2, 1]` <br>
+Spherical Voxel Count at point height of `r point_height[2]` m (5cm resolution): `r spherical_voxel_counts[2, 2]` <br>
+Spherical Voxel Count at point height of `r point_height[3]` m (5cm resolution): `r spherical_voxel_counts[2, 3]` <br>
+Spherical Voxel Count at point height of `r point_height[4]` m (5cm resolution): `r spherical_voxel_counts[2, 4]` <br>
+Spherical Voxel Count at point height of `r point_height[5]` m (5cm resolution): `r spherical_voxel_counts[2, 5]` <br>
+
+
+```{r spherical-distance-plot, results='asis', message=FALSE, warning=FALSE}
+if (toggle_spherical_dist_plot) {
+  rgl::clear3d()
+  cols <- rev(rainbow(max(visual_tls$color_dist)+1, end=4/6))
+  rgl::plot3d(visual_tls[,.(X,Y,Z)], col=cols[visual_tls$color_dist+1], add=TRUE, aspect = 'iso')
+  # VoxR::plot_voxels(voxel_5cm)
+  # rgl::plot3d(voxel_5cm)
+  
+  # Add spheres for visualization
+  rgl::spheres3d(x = 0, y = 0, z = visual_point_height, radius = 0.2, color = "red")
+  rgl::spheres3d(x = 0, y = 0, z = visual_point_height, radius = wireframe_sphere_radius,
+                color = "black", alpha = 0.1)
+  
+  widget_3d <- rgl::rglwidget(width = 500, height = 500)
+  
+  # Create the 2D density plot
+  png_file <- tempfile(fileext = ".png")
+  png(png_file, width = 400, height = 400, res = 96)
+  par(mar = c(4, 4, 1, 1))
+  # Use the saved visual_density_result for plotting
+  plot(visual_density_result, main = "", xlab = "Distance (m)", ylab = "Density")
+  polygon(visual_density_result, col = rgb(0, 0, 1, 0.3), border = "blue")
+  # Use saved visual_x_range and visual_y_range for the integration area
+  polygon(c(visual_x_range, rev(visual_x_range)), c(visual_y_range, rep(0, length(visual_y_range))), col = rgb(1, 0, 0, 0.3), border = "red")
+  dev.off()
+  
+  if(keep_spherical3Dplot) {
+    combined_widget <- htmltools::tagList(
+      htmltools::div(style = "display: flex; align-items: center;",
+        htmltools::div(style = "flex: 1; text-align: center; padding: 5px;",
+          htmltools::h4("3D Distance Visualization ( point height: ", visual_point_height, " m ) "),
+          widget_3d
+        ),
+        htmltools::div(style = "flex: 1; text-align: center; padding: 5px;",
+          htmltools::h4("Distance Density Distribution", "( point height: ", visual_point_height, " m )"),
+          htmltools::tags$img(src = knitr::image_uri(png_file), style = "width:100%; height:auto;")
+        )
+      )
+    )
+    combined_widget
+    
+  } else {
+    plot3d_file <- tempfile(fileext = ".png")
+    rgl::snapshot3d(plot3d_file, width = 500, height = 500)
+    rgl::clear3d()
+    
+    combined_widget <- htmltools::tagList(
+      htmltools::div(style = "display: flex; align-items: center;",
+        htmltools::div(style = "flex: 1; text-align: center; padding: 5px;",
+          htmltools::h4("3D Distance Visualization | Point height of ", visual_point_height, "m"),
+          htmltools::tags$img(src = knitr::image_uri(plot3d_file), style = "width:100%; height:auto;")
+        ),
+        htmltools::div(style = "flex: 1; text-align: center; padding: 5px;",
+          htmltools::h4("Distance Density Distribution", "(", visual_point_height, "m)"),
+          htmltools::tags$img(src = knitr::image_uri(png_file), style = "width:100%; height:auto;")
+        )
+      )
+    )
+    combined_widget
+  }
+}
+```
+
+### Cone Density Evaluation (percentage of total cone volume)
+
+```{r cone_density_eval, message=FALSE, warning=FALSE}
+# Initialize MATRICES (4 sizes x 5 heights)
+nb_voxels_in_cone_at_height <- matrix(0, nrow=4, ncol=5)
+
+# Variables to store data specifically for the plot (usually for the highest res i=1)
+visual_cone_indices <- NULL
+visual_tls_cone <- NULL
+
+for(i in 1:4) {
+  vox_matrix <- vox_matrices_diff_sizes[[i]]
+  tls_voxel_cone <- data.table::data.table(X = vox_matrix$x, Y = vox_matrix$y, Z = vox_matrix$z)
+  
+  # Loop 2: Heights
+  for(j in 1:5) {
+    
+    # --- VECTORIZED CALCULATION (Much faster than row-by-row loop) ---
+    # 1. Filter Z height (Upside down cone logic from your script)
+    # Check if Z is between tip and base
+    in_z_range <- tls_voxel_cone$Z >= cone_tip_z[j] & tls_voxel_cone$Z <= cone_base_z[j]
+    
+    # 2. Calculate max radius at the specific Z of every voxel
+    # Formula: radius * (1 - (dist_from_base / height))
+    height_ratio <- (cone_base_z[j] - tls_voxel_cone$Z) / cone_height
+    radius_at_height <- cone_radius * (1 - height_ratio)
+    
+    # 3. Calculate XY distance from axis for every voxel
+    distance_from_axis <- sqrt((tls_voxel_cone$X - cone_tip_x)^2 + (tls_voxel_cone$Y - cone_tip_y)^2)
+    
+    # 4. Combine: Must be in Z range AND inside radius
+    is_inside <- in_z_range & (distance_from_axis <= radius_at_height)
+    
+    voxels_in_cone <- sum(is_inside, na.rm = TRUE)
+    nb_voxels_in_cone_at_height[i, j] <- voxels_in_cone
+    
+    # Store data for the visualization (Only for i=2 (5cm) and the selected visual height)
+    if(i == 2 && cone_base_z[j] == visual_cone_base_height) {
+      visual_tls_cone <- tls_voxel_cone
+      visual_cone_indices <- which(is_inside)
+    }
+  }
+}
+```
+
+
+Conical voxel count at cone base of `r cone_base_z[1]` m: `r nb_voxels_in_cone_at_height[2,1]` voxels at 5cm resolution <br>
+Conical voxel count at cone base of `r cone_base_z[2]` m: `r nb_voxels_in_cone_at_height[2,2]` voxels at 5cm resolution <br>
+Conical voxel count at cone base of `r cone_base_z[3]` m: `r nb_voxels_in_cone_at_height[2,3]` voxels at 5cm resolution <br>
+Conical voxel count at cone base of `r cone_base_z[4]` m: `r nb_voxels_in_cone_at_height[2,4]` voxels at 5cm resolution <br>
+Conical voxel count at cone base of `r cone_base_z[5]` m: `r nb_voxels_in_cone_at_height[2,5]` voxels at 5cm resolution <br>
+
+```{r cone_density_plot, warning=FALSE, message=FALSE}
+if (toggle_cone_density_plot) {
+  rgl::clear3d()
+  
+  # Use the saved visual data (from i=1)
+  points3d(visual_tls_cone$X, visual_tls_cone$Y, visual_tls_cone$Z, col="green", size=3)
+  
+  if (length(visual_cone_indices) > 0) {
+    # Use the saved indices
+    cone_points <- visual_tls_cone[visual_cone_indices, ]
+    points3d(cone_points$X, cone_points$Y, cone_points$Z, col="red", size=5)
+  }
+  
+  theta <- seq(0, 2*pi, length.out=64)
+  cone_x <- cone_radius * cos(theta)
+  cone_y <- cone_radius * sin(theta)
+  
+  lines3d(c(cone_x, cone_x[1]), c(cone_y, cone_y[1]), rep(visual_cone_base_height, 65), col="blue", lwd=3)
+  
+  for (i in seq(1, 64, by=2)) {
+    lines3d(c(cone_x[i], cone_tip_x),
+            c(cone_y[i], cone_tip_y),
+            c(visual_cone_base_height, visual_cone_tip_z),
+            col="blue", lwd=3)
+  }
+  spheres3d(0, 0, 0, radius=0.12, col="yellow")
+  
+  if (keep_conical3Dplot) {
+    widget <- div(
+      tags$h4("Conical clearance zone at cone base height of ", visual_cone_base_height, " m"),
+      rgl::rglwidget(width = 500, height = 500)
+    )
+    rgl::clear3d()
+    widget
+  
+  } else {
+    plot3d_file <- tempfile(fileext = ".png")
+    rgl::snapshot3d(plot3d_file, width = 500, height = 500)
+    rgl::clear3d()
+  
+    htmltools::div(
+      htmltools::h4("Conical clearance zone at cone base height of ", visual_cone_base_height, " m"),
+      htmltools::tags$img(src = knitr::image_uri(plot3d_file))
+    )
+  }
+}
+```
+
+```{r cone_new_resolutions_for_regression, message=FALSE, warning=FALSE}
+# --- NEW ISOLATED SECTION: 13 Resolutions for Excel Export ---
+# This uses your raw XYZ points to bypass your old vox_matrices_diff_sizes variable completely.
+
+resolutions_cm <- c(0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10, 15, 20)
+
+total_voxels_for_each_res <- numeric(length(resolutions_cm))
+crit_voxels_for_each_res <- numeric(length(resolutions_cm))
+
+# 1. Find the index for the 6m height
+idx_6m <- which.min(abs(cone_base_z - 6))
+
+# 2. Filter raw XYZ to ONLY points inside the 6m cone (Much faster to do this before voxelizing!)
+in_z <- XYZ$Z >= cone_tip_z[idx_6m] & XYZ$Z <= cone_base_z[idx_6m]
+height_ratio <- (cone_base_z[idx_6m] - XYZ$Z[in_z]) / cone_height
+radius_at_h <- cone_radius * (1 - height_ratio)
+
+# Calculate distance from center axis for points in Z range
+dist_from_axis <- sqrt((XYZ$X[in_z] - cone_tip_x)^2 + (XYZ$Y[in_z] - cone_tip_y)^2)
+is_inside <- dist_from_axis <= radius_at_h
+
+# Extract the raw points that are strictly inside the 6m cone
+raw_cone_points <- XYZ[in_z, ][is_inside, ] 
+
+# 3. Fast Voxelization loop for the 13 resolutions
+for(i in seq_along(resolutions_cm)) {
+  res_m <- resolutions_cm[i] / 100 # Convert to meters
+  
+  # Calculate Total tree voxels (fast mathematical downsampling of XYZ)
+  vox_total <- unique(data.table::data.table(
+    X = round(XYZ$X / res_m) * res_m,
+    Y = round(XYZ$Y / res_m) * res_m,
+    Z = round(XYZ$Z / res_m) * res_m
+  ))
+  total_voxels_for_each_res[i] <- nrow(vox_total)
+  
+  # Calculate Critical cone voxels (downsampling only the cone points)
+  vox_cone <- unique(data.table::data.table(
+    X = round(raw_cone_points$X / res_m) * res_m,
+    Y = round(raw_cone_points$Y / res_m) * res_m,
+    Z = round(raw_cone_points$Z / res_m) * res_m
+  ))
+  crit_voxels_for_each_res[i] <- nrow(vox_cone)
+}
+
+# 4. Name the variables so they export as perfect Excel columns
+names(total_voxels_for_each_res) <- paste0("Total_Count_", resolutions_cm)
+names(crit_voxels_for_each_res) <- paste0("Cone_Count_", resolutions_cm)
+```
+
+### VoxR Tree Metrics and Voxelisation (visualisation at 2.5cm) 
+
+VoxR height: `r voxR_height` m <br>
+VoxR DBH: `r voxR_DBH` cm <br>
+VoxR biomass: `r voxR_biomass` kg <br>
+VoxR crown diameter: `r voxR_crown_diam` m <br>
+VoxR projected area: `r voxR_proj_area` m^2 <br>
+
+```{r voxR-plot, message=FALSE, warning=FALSE}
+if (toggle_voxr_plot) {
+  rgl::clear3d()
+  if (keep_voxel3Dplot) {
+    VoxR::plot_voxels(voxel_2_5cm)
+    widget <- rgl::rglwidget(width = 500, height = 500)
+    rgl::clear3d()
+    widget
+    
+  } else {
+    # Capture 3D plot as PNG
+    plot3d_file <- tempfile(fileext = ".png")
+    VoxR::plot_voxels(voxel_2_5cm)   # plot first
+    rgl::snapshot3d(plot3d_file, width = 1000, height = 1000)
+    rgl::clear3d()
+    knitr::include_graphics(plot3d_file)
+  }
+}
+```
+
+
+### Yearly Comparison of Tree Growth and Tree Loss
+
+```{r voxR-comparison-year, message=FALSE, warning=FALSE}
+run_db_scan_comparison <- TRUE
+
+#year_comp_dbscan_eps is set to 2.5 × voxel_res by default (≈ 0.125 m at 5 cm voxels). This means a voxel needs a real neighbour within roughly two voxel-widths to survive. Raise it if legitimate thin branches are being eaten; lower it if noise is still slipping through.
+#year_comp_dbscan_min at 5 means a cluster needs at least 5 voxels. For very fine changes (single broken twig) you'd lower this to 3; for a stricter "only obvious structural changes" pass, push it to 10–15.
+
+combos <- expand.grid(vox_res = c(0.05, 0.10), vox_dist = c(0.05, 0.10, 0.15))
+comp_results <- list()
+
+if (has_prev_year_comparison_file) {
+  t0_comp <- XYZ
+
+  las_prev_raw <- lidR::readLAS(prev_year_file_path, select = "xyz")
+  if (lidR::is.empty(las_prev_raw)) stop("ERROR: Previous-year point cloud is empty!")
+
+  prev_raw_df  <- as.data.frame(las_prev_raw@data)[, c("X", "Y", "Z")]
+  t1_comp      <- prev_raw_df
+  t1_comp$X    <- t1_comp$X - X0
+  t1_comp$Y    <- t1_comp$Y - Y0
+  t1_comp$Z    <- t1_comp$Z - Z0
+
+  year_cur  <- regmatches(current_file_name, regexpr("\\d{4}", current_file_name))
+  year_prev <- regmatches(basename(prev_year_file_path), regexpr("\\d{4}", basename(prev_year_file_path)))
+  label_cur  <- if (length(year_cur)  == 1) year_cur  else "Current year"
+  label_prev <- if (length(year_prev) == 1) year_prev else "Previous year"
+
+  for (i in 1:nrow(combos)) {
+    res_val  <- combos$vox_res[i]
+    dist_val <- combos$vox_dist[i]
+    
+    eps_val <- res_val * 2.5
+    min_pts <- 5
+
+    v0_xyz <- as.data.frame(VoxR::vox(t0_comp, res = res_val))[, 1:3]
+    v1_xyz <- as.data.frame(VoxR::vox(t1_comp, res = res_val))[, 1:3]
+    colnames(v0_xyz) <- colnames(v1_xyz) <- c("X", "Y", "Z")
+
+    diff_vox <- as.data.frame(VoxR::substract_point_clouds(t0 = v1_xyz, t1 = v0_xyz, method = "distance", dist = dist_val))[, 1:3]
+    colnames(diff_vox) <- c("X", "Y", "Z")
+
+    lost_vox <- as.data.frame(VoxR::substract_point_clouds(t0 = v0_xyz, t1 = v1_xyz, method = "distance", dist = dist_val))[, 1:3]
+    colnames(lost_vox) <- c("X", "Y", "Z")
+
+    # Trunk height filter applied before DBSCAN metrics
+    z_floor <- trunk_height * 0.90
+    diff_vox <- diff_vox[diff_vox$Z >= z_floor, ]
+    lost_vox <- lost_vox[lost_vox$Z >= z_floor, ]
+
+    n_growth_raw <- nrow(diff_vox)
+    n_loss_raw   <- nrow(lost_vox)
+    growth_clusters <- 0
+    loss_clusters   <- 0
+
+    if (run_db_scan_comparison) {
+      clean_with_dbscan <- function(pts, eps, min_pts) {
+        if (nrow(pts) < min_pts) return(list(pts = pts[0, ], clusters = 0))
+        cl <- dbscan::dbscan(pts[, c("X", "Y", "Z")], eps = eps, minPts = min_pts)
+        list(pts = pts[cl$cluster > 0, ], clusters = max(cl$cluster))
+      }
+
+      growth_db <- clean_with_dbscan(diff_vox, eps_val, min_pts)
+      loss_db   <- clean_with_dbscan(lost_vox, eps_val, min_pts)
+      
+      diff_vox <- growth_db$pts
+      lost_vox <- loss_db$pts
+      
+      growth_clusters <- growth_db$clusters
+      loss_clusters   <- loss_db$clusters
+    }
+    
+    combo_name <- paste0("res_", res_val * 100, "cm_dist_", dist_val * 100, "cm")
+    comp_results[[combo_name]] <- list(
+      res_val = res_val,
+      dist_val = dist_val,
+      diff_vox = diff_vox,
+      lost_vox = lost_vox,
+      n_v0 = nrow(v0_xyz),
+      n_v1 = nrow(v1_xyz),
+      n_growth_raw = n_growth_raw,
+      n_loss_raw = n_loss_raw,
+      n_growth_clean = nrow(diff_vox),
+      n_loss_clean = nrow(lost_vox),
+      growth_clusters = growth_clusters,
+      loss_clusters = loss_clusters
+    )
+  }
+  
+  diff_vox_plot <- comp_results[["res_5cm_dist_10cm"]]$diff_vox
+  lost_vox_plot <- comp_results[["res_5cm_dist_10cm"]]$lost_vox
+}
+```
+
+```{r voxR-comparison-table, message=FALSE, warning=FALSE, results='asis'}
+if (toggle_yearly_comp_table && has_prev_year_comparison_file) {
+  
+  nn_dists <- dbscan::kNN(x = t0_comp[, 1:3], query = t1_comp[, 1:3], k = 1)$dist
+  alignment_rmse <- sqrt(mean(nn_dists^2))
+  
+  # 1. Print metrics that are independent of distance
+  cat("#### **Alignment Metrics & Base Voxel Counts**\n\n")
+  cat(sprintf("- **Alignment RMSE**: %.3f m\n", alignment_rmse))
+  
+  res_processed <- c()
+  for (name in names(comp_results)) {
+    res_val <- comp_results[[name]]$res_val
+    if (!(res_val %in% res_processed)) {
+      n_v1 <- comp_results[[name]]$n_v1
+      n_v0 <- comp_results[[name]]$n_v0
+      net_diff <- n_v0 - n_v1
+      net_sign <- ifelse(net_diff > 0, "+", "")
+      pct_net <- round((net_diff / n_v1) * 100, 1)
+      
+      cat(sprintf("- **Voxel Size %.0f cm**: Previous = %s | Current = %s | Net Difference = %s%s (%s%.1f%%)\n", 
+                  res_val * 100, 
+                  format(n_v1, big.mark = ","), 
+                  format(n_v0, big.mark = ","),
+                  net_sign, format(net_diff, big.mark = ","),
+                  net_sign, pct_net))
+      
+      res_processed <- c(res_processed, res_val)
+    }
+  }
+  cat("\n\n#### **Growth and Loss by Distance Threshold (DBSCAN Cleaned)**\n\n")
+
+  # 2. Build detailed table for the distance-dependent metrics
+  summary_comp_data <- data.frame()
+  
+  for (name in names(comp_results)) {
+    r_info <- comp_results[[name]]
+    dist_val <- r_info$dist_val
+    res_val <- r_info$res_val
+    
+    fitting_ratio <- sum(nn_dists <= dist_val) / length(nn_dists)
+    
+    g_raw <- r_info$n_growth_raw
+    g_clean <- r_info$n_growth_clean
+    g_pct <- ifelse(g_raw > 0, round((g_clean / g_raw) * 100, 1), 0)
+    g_total_pct <- (g_clean / r_info$n_v0) * 100
+    
+    l_raw <- r_info$n_loss_raw
+    l_clean <- r_info$n_loss_clean
+    l_pct <- ifelse(l_raw > 0, round((l_clean / l_raw) * 100, 1), 0)
+    l_total_pct <- (l_clean / r_info$n_v1) * 100
+
+    
+    summary_comp_data <- rbind(summary_comp_data, data.frame(
+      Vox_Res = sprintf("%.0f cm", res_val * 100),
+      Dist_Thresh = sprintf("%.0f cm", dist_val * 100),
+      Fitting_Ratio = sprintf("%.1f %%", fitting_ratio * 100),
+      Growth_Total = sprintf("%.1f%%", g_total_pct),
+      Growth_Combined = sprintf("%s / %s (%.1f%%)", format(g_clean, big.mark=","), format(g_raw, big.mark=","), g_pct),
+      Growth_Clusters = r_info$growth_clusters,
+      # Loss_Total = sprintf("%.1f%%", l_total_pct),
+      # Loss_Combined = sprintf("%s / %s (%.1f%%)", format(l_clean, big.mark=","), format(l_raw, big.mark=","), l_pct),
+      # Loss_Clusters = r_info$loss_clusters,
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  # colnames(summary_comp_data) <- c(
+  #   "Voxel Res", "Dist Threshold", "Fitting Ratio (Pct_Points_Within_Thresh)", "Growth Total",
+  #   "Growth (Clean / Raw)", "Growth Clusters", 
+  #   "Loss Total", "Loss (Clean / Raw)", "Loss Clusters" 
+  # )
+  
+  colnames(summary_comp_data) <- c(
+    "Voxel Res", "Dist Threshold", "Fitting Ratio (Pct_Points_Within_Thresh)", "Growth Total (per of current yr)",
+    "Growth (Clean / Raw)", "Growth Clusters" 
+    )
+  
+  # print(knitr::kable(summary_comp_data, 
+  #                    align = c("c", "c", "c", "r", "c", "c", "r", "c", "c")))
+  
+  print(knitr::kable(summary_comp_data, 
+                   align = c("c", "c", "c", "r", "c", "c")))
+}
+```
+
+```{r voxR-comparison-year-visualisation-old, results='asis', message=FALSE, warning=FALSE}
+ax_val   <- show_rgl_axes
+box_val  <- show_rgl_axes
+xlab_val <- if(show_rgl_axes) "X" else ""
+ylab_val <- if(show_rgl_axes) "Y" else ""
+zlab_val <- if(show_rgl_axes) "Z" else ""
+# ────────────────────────────────────────────────────────────────────────
+
+if (toggle_yearly_comp_plot && has_prev_year_comparison_file) {
+  rgl::clear3d()
+
+  if (keep_voxRyearComparison_3Dplot) {
+    rgl::open3d()
+    rgl::plot3d(t0_comp, col = "darkgray", size = 2, alpha = 0.5, 
+                xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, axes = ax_val, box = box_val)
+    rgl::aspect3d("iso") # FIX: prevents stretching/shrinking
+    rgl::points3d(t1_comp$X, t1_comp$Y, t1_comp$Z, col = "purple", size = 2, alpha = 0.5)
+    widget_align <- rgl::rglwidget(width = 700, height = 600)
+    rgl::clear3d()
+    
+    rgl::open3d()
+    rgl::plot3d(t0_comp, col = "gray", size = 1, alpha = 0.2, 
+                xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, axes = ax_val, box = box_val)
+    rgl::aspect3d("iso") # FIX: prevents stretching/shrinking
+    if (nrow(diff_vox_plot) > 0) rgl::points3d(diff_vox_plot$X, diff_vox_plot$Y, diff_vox_plot$Z, col = "green", size = 8)
+    if (nrow(lost_vox_plot) > 0) rgl::points3d(lost_vox_plot$X, lost_vox_plot$Y, lost_vox_plot$Z, col = "red",   size = 8)
+    widget_diff <- rgl::rglwidget(width = 700, height = 700)
+    rgl::clear3d()
+    
+    htmltools::tagList(widget_align, widget_diff)
+
+  } else {
+
+    # ── Helper: snapshot one rgl diff plot ──────────────────────────────────
+    make_diff_png <- function(diff_pts, lost_pts, title_str) {
+      tmp <- tempfile(fileext = ".png")
+      rgl::open3d()
+      rgl::plot3d(t0_comp, col = "gray", size = 1, alpha = 0.2,
+                  main = title_str, xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, 
+                  axes = ax_val, box = box_val)
+      rgl::aspect3d("iso") # FIX: prevents stretching/shrinking
+      if (nrow(diff_pts) > 0) rgl::points3d(diff_pts$X, diff_pts$Y, diff_pts$Z, col = "green", size = 8)
+      if (nrow(lost_pts) > 0) rgl::points3d(lost_pts$X, lost_pts$Y, lost_pts$Z, col = "red",   size = 8)
+      rgl::snapshot3d(tmp, width = 1000, height = 1000)
+      rgl::close3d()
+      tmp
+    }
+
+    # ── Plot 1 (left, row 1): alignment ─────────────────────────────────────
+    tmp_png_align <- tempfile(fileext = ".png")
+    rgl::open3d()
+    rgl::plot3d(t0_comp, col = "darkgray", size = 2, alpha = 0.5,
+                main = paste0("Alignment: ", label_cur, " (gray) vs ", label_prev, " (purple)"),
+                xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, axes = ax_val, box = box_val)
+    rgl::aspect3d("iso") # FIX: prevents stretching/shrinking
+    rgl::points3d(t1_comp$X, t1_comp$Y, t1_comp$Z, col = "purple", size = 2, alpha = 0.5)
+    rgl::snapshot3d(tmp_png_align, width = 1000, height = 1000)
+    rgl::close3d()
+
+    # ── Plot 2 (right, row 1): 5 cm vox / 10 cm dist — NO clustering ────────
+    z_floor <- trunk_height * 0.90
+
+    v0_nd <- as.data.frame(VoxR::vox(t0_comp, res = 0.05))[, 1:3]
+    v1_nd <- as.data.frame(VoxR::vox(t1_comp, res = 0.05))[, 1:3]
+    colnames(v0_nd) <- colnames(v1_nd) <- c("X", "Y", "Z")
+
+    diff_nd <- as.data.frame(VoxR::substract_point_clouds(t0 = v1_nd, t1 = v0_nd, method = "distance", dist = 0.10))[, 1:3]
+    lost_nd <- as.data.frame(VoxR::substract_point_clouds(t0 = v0_nd, t1 = v1_nd, method = "distance", dist = 0.10))[, 1:3]
+    colnames(diff_nd) <- colnames(lost_nd) <- c("X", "Y", "Z")
+    diff_nd <- diff_nd[diff_nd$Z >= z_floor, ]
+    lost_nd <- lost_nd[lost_nd$Z >= z_floor, ]
+
+    tmp_png_nodbs <- make_diff_png(
+      diff_nd, lost_nd,
+      paste0("5 cm vox / 10 cm dist — without clustering\n",
+             "growth: ", nrow(diff_nd), "  loss: ", nrow(lost_nd))
+    )
+
+    # ── Plots 3–8: all 6 combos (with DBSCAN) ───────────────────────────────
+    combo_pngs <- lapply(names(comp_results), function(nm) {
+      res  <- comp_results[[nm]]
+      # parse label from name, e.g. "res_5cm_dist_10cm"
+      parts <- regmatches(nm, gregexpr("[0-9]+", nm))[[1]]
+      title_str <- paste0(
+        parts[1], " cm vox / ", parts[2], " cm dist — with clustering\n",
+        "growth: ", nrow(res$diff_vox), "  loss: ", nrow(res$lost_vox)
+      )
+      make_diff_png(res$diff_vox, res$lost_vox, title_str)
+    })
+
+    # ── Layout helper: one row of img tags ───────────────────────────────────
+    img_tag <- function(png_path) {
+      htmltools::tags$img(
+        src   = knitr::image_uri(png_path),
+        style = "width:50%; object-fit:contain;"
+      )
+    }
+
+    row_div <- function(...) {
+      htmltools::div(style = "display:flex; gap:6px; margin-bottom:6px;", ...)
+    }
+
+    # ── Assemble 4 rows × 2 cols ─────────────────────────────────────────────
+    htmltools::tagList(
+      row_div(img_tag(tmp_png_align),       img_tag(tmp_png_nodbs)),        # row 1
+      row_div(img_tag(combo_pngs[[1]]),     img_tag(combo_pngs[[2]])),      # row 2
+      row_div(img_tag(combo_pngs[[3]]),     img_tag(combo_pngs[[4]])),      # row 3
+      row_div(img_tag(combo_pngs[[5]]),     img_tag(combo_pngs[[6]]))       # row 4
+    )
+  }
+}
+```
+
+
+```{r voxR-comparison-year-visualisation, results='asis', message=FALSE, warning=FALSE}
+ax_val   <- show_rgl_axes
+box_val  <- show_rgl_axes
+xlab_val <- if(show_rgl_axes) "X" else ""
+ylab_val <- if(show_rgl_axes) "Y" else ""
+zlab_val <- if(show_rgl_axes) "Z" else ""
+# ────────────────────────────────────────────────────────────────────────
+
+if (toggle_yearly_comp_plot && has_prev_year_comparison_file) {
+  rgl::clear3d()
+
+  if (keep_voxRyearComparison_3Dplot) {
+    rgl::open3d()
+    rgl::plot3d(t0_comp, col = "darkgray", size = 2, alpha = 0.5, 
+                xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, 
+                axes = ax_val, box = box_val)
+    rgl::aspect3d("iso") # Prevents stretching/shrinking
+    rgl::points3d(t1_comp$X, t1_comp$Y, t1_comp$Z, col = "purple", size = 2, alpha = 0.5)
+    widget_align <- rgl::rglwidget(width = 700, height = 600)
+    rgl::clear3d()
+    
+    rgl::open3d()
+    rgl::plot3d(t0_comp, col = "gray", size = 1, alpha = 0.2, 
+                xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, 
+                axes = ax_val, box = box_val)
+    rgl::aspect3d("iso") # Prevents stretching/shrinking
+    if (nrow(diff_vox_plot) > 0) rgl::points3d(diff_vox_plot$X, diff_vox_plot$Y, diff_vox_plot$Z, col = "green", size = 8)
+    if (nrow(lost_vox_plot) > 0) rgl::points3d(lost_vox_plot$X, lost_vox_plot$Y, lost_vox_plot$Z, col = "red",   size = 8)
+    widget_diff <- rgl::rglwidget(width = 700, height = 700)
+    rgl::clear3d()
+    
+    htmltools::tagList(widget_align, widget_diff)
+
+  } else {
+
+    # ── Helper: snapshot one rgl diff plot at the correct voxel resolution ───
+    make_diff_png <- function(diff_pts, lost_pts, title_str, vox_res = 0.05) {
+      tmp <- tempfile(fileext = ".png")
+
+      bg_vox <- as.data.frame(VoxR::vox(t0_comp, res = vox_res))[, 1:3]
+      colnames(bg_vox) <- c("x", "y", "z")
+
+      rgl::open3d()
+
+      # Initialize axes bounding box invisibly. Include axis toggles.
+      rgl::plot3d(t0_comp, type = "n", main = title_str, 
+                  xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, 
+                  axes = ax_val, box = box_val)
+      rgl::aspect3d("iso") # Force 1:1:1 real-world physical proportion
+
+      # Background — capture mesh and shade
+      bg_mesh <- VoxR::plot_voxels(bg_vox, res = vox_res, type = "p", 
+                                   plot = FALSE, message = FALSE)
+      rgl::shade3d(bg_mesh$mesh, color = "gray", alpha = 0.15, lit = FALSE)
+
+      # Growth (Green) — capture mesh and plot with alpha=1
+      if (nrow(diff_pts) > 0) {
+        colnames(diff_pts)[1:3] <- c("x", "y", "z")
+        diff_mesh <- VoxR::plot_voxels(diff_pts, res = vox_res, type = "p", 
+                                       plot = FALSE, message = FALSE)
+        rgl::shade3d(diff_mesh$mesh, color = "green", alpha = 1, lit = FALSE)
+      }
+
+      # Loss (Red) — capture mesh and plot with alpha=1
+      if (nrow(lost_pts) > 0) {
+        colnames(lost_pts)[1:3] <- c("x", "y", "z")
+        lost_mesh <- VoxR::plot_voxels(lost_pts, res = vox_res, type = "p", 
+                                       plot = FALSE, message = FALSE)
+        rgl::shade3d(lost_mesh$mesh, color = "red", alpha = 1, lit = FALSE)
+      }
+
+      rgl::snapshot3d(tmp, width = 1000, height = 1000)
+      rgl::close3d()
+      
+      return(tmp)
+    }
+
+    # ── Plot 1 (left, row 1): alignment ─────────────────────────────────────
+    tmp_png_align <- tempfile(fileext = ".png")
+    rgl::open3d()
+    rgl::plot3d(t0_comp, col = "darkgray", size = 2, alpha = 0.5,
+                main = paste0("Alignment: ", label_cur, " (gray) vs ", label_prev, " (purple)"),
+                xlab = xlab_val, ylab = ylab_val, zlab = zlab_val, 
+                axes = ax_val, box = box_val)
+    rgl::aspect3d("iso") # Maintain scale here too
+    rgl::points3d(t1_comp$X, t1_comp$Y, t1_comp$Z, col = "purple", size = 2, alpha = 0.5)
+    rgl::snapshot3d(tmp_png_align, width = 1000, height = 1000)
+    rgl::close3d()
+
+    # ── Plot 2 (right, row 1): 5 cm vox / 10 cm dist — NO clustering ────────
+    z_floor <- trunk_height * 0.90
+
+    v0_nd <- as.data.frame(VoxR::vox(t0_comp, res = 0.05))[, 1:3]
+    v1_nd <- as.data.frame(VoxR::vox(t1_comp, res = 0.05))[, 1:3]
+    colnames(v0_nd) <- colnames(v1_nd) <- c("X", "Y", "Z")
+
+    diff_nd <- as.data.frame(VoxR::substract_point_clouds(t0 = v1_nd, t1 = v0_nd, method = "distance", dist = 0.10))[, 1:3]
+    lost_nd <- as.data.frame(VoxR::substract_point_clouds(t0 = v0_nd, t1 = v1_nd, method = "distance", dist = 0.10))[, 1:3]
+    colnames(diff_nd) <- colnames(lost_nd) <- c("X", "Y", "Z")
+    diff_nd <- diff_nd[diff_nd$Z >= z_floor, ]
+    lost_nd <- lost_nd[lost_nd$Z >= z_floor, ]
+
+    tmp_png_nodbs <- make_diff_png(
+      diff_nd, lost_nd,
+      paste0("5 cm vox / 10 cm dist — without clustering\n",
+             "growth: ", nrow(diff_nd), "  loss: ", nrow(lost_nd)),
+      vox_res = 0.05
+    )
+
+    # ── Plots 3–8: all 6 combos (with DBSCAN) ───────────────────────────────
+    combo_pngs <- lapply(names(comp_results), function(nm) {
+      res         <- comp_results[[nm]]
+      parts       <- regmatches(nm, gregexpr("[0-9]+", nm))[[1]]
+      vox_res_val <- as.numeric(parts[1]) / 100   # "5" → 0.05, "10" → 0.10
+      title_str   <- paste0(
+        parts[1], " cm vox / ", parts[2], " cm dist — with clustering\n",
+        "growth: ", nrow(res$diff_vox), "  loss: ", nrow(res$lost_vox)
+      )
+      make_diff_png(res$diff_vox, res$lost_vox, title_str, vox_res = vox_res_val)
+    })
+
+    # ── Layout helpers ───────────────────────────────────────────────────────
+    img_tag <- function(png_path) {
+      htmltools::tags$img(
+        src   = knitr::image_uri(png_path),
+        style = "width:50%; object-fit:contain;"
+      )
+    }
+
+    row_div <- function(...) {
+      htmltools::div(style = "display:flex; gap:6px; margin-bottom:6px;", ...)
+    }
+
+    # ── Assemble 4 rows × 2 cols ─────────────────────────────────────────────
+    htmltools::tagList(
+      row_div(img_tag(tmp_png_align),   img_tag(tmp_png_nodbs)),   # row 1
+      row_div(img_tag(combo_pngs[[1]]), img_tag(combo_pngs[[2]])), # row 2
+      row_div(img_tag(combo_pngs[[3]]), img_tag(combo_pngs[[4]])), # row 3
+      row_div(img_tag(combo_pngs[[5]]), img_tag(combo_pngs[[6]]))  # row 4
+    )
+  }
+}
+```
+
+
+### Conical Critical Zone Yearly Comparison of Tree Growth and Tree Loss
+
+```{r voxR-comparison-year-cone, results='asis', message=FALSE, warning=FALSE}
+if (has_prev_year_comparison_file) {
+  
+  # Parameter to select which resolution/distance combo to use for the cone analysis
+  selected_combo_name <- "res_10cm_dist_10cm" 
+  
+  if (selected_combo_name %in% names(comp_results)) {
+    
+    cat(sprintf("#### **Conical Clearance Zone (Using %s)**\n\n", selected_combo_name))
+    
+    # 1. Extract the globally cleaned points
+    diff_vox_clean <- comp_results[[selected_combo_name]]$diff_vox
+    lost_vox_clean <- comp_results[[selected_combo_name]]$lost_vox
+    
+    res_val  <- comp_results[[selected_combo_name]]$res_val
+    dist_val <- comp_results[[selected_combo_name]]$dist_val
+    eps_val  <- res_val * 2.5
+    
+    # 2. Recalculate RAW differences to accurately report "Clean / Raw" inside the cone
+    v0_xyz <- as.data.frame(VoxR::vox(t0_comp, res = res_val))[, 1:3]
+    v1_xyz <- as.data.frame(VoxR::vox(t1_comp, res = res_val))[, 1:3]
+    colnames(v0_xyz) <- colnames(v1_xyz) <- c("X", "Y", "Z")
+    
+    diff_vox_raw <- as.data.frame(VoxR::substract_point_clouds(t0 = v1_xyz, t1 = v0_xyz, method = "distance", dist = dist_val))[, 1:3]
+    lost_vox_raw <- as.data.frame(VoxR::substract_point_clouds(t0 = v0_xyz, t1 = v1_xyz, method = "distance", dist = dist_val))[, 1:3]
+    colnames(diff_vox_raw) <- c("X", "Y", "Z")
+    colnames(lost_vox_raw) <- c("X", "Y", "Z")
+    
+    z_floor <- trunk_height * 0.90
+    diff_vox_raw <- diff_vox_raw[diff_vox_raw$Z >= z_floor, ]
+    lost_vox_raw <- lost_vox_raw[lost_vox_raw$Z >= z_floor, ]
+    
+    cone_growth_loss_summary <- data.frame()
+    
+    # Variables for the visualizer chunk specifically
+    visual_growth_in_cone <- NULL
+    visual_loss_in_cone <- NULL
+    visual_diff_vox_cone <- diff_vox_clean
+    visual_lost_vox_cone <- lost_vox_clean
+    
+    for(j in 1:length(cone_base_z)) {
+      
+      # Vectorized function to find which points are inside the upside-down cone
+      get_voxels_in_cone <- function(pts) {
+        if (nrow(pts) == 0) return(rep(FALSE, 0))
+        in_z <- pts$Z >= cone_tip_z[j] & pts$Z <= cone_base_z[j]
+        h_ratio <- (cone_base_z[j] - pts$Z) / cone_height
+        r_at_h <- cone_radius * (1 - h_ratio)
+        dist_axis <- sqrt((pts$X - cone_tip_x)^2 + (pts$Y - cone_tip_y)^2)
+        return(in_z & (dist_axis <= r_at_h))
+      }
+      
+      # Get Raw points intersecting the cone
+      idx_g_raw <- get_voxels_in_cone(diff_vox_raw)
+      idx_l_raw <- get_voxels_in_cone(lost_vox_raw)
+      g_raw_count <- sum(idx_g_raw, na.rm = TRUE)
+      l_raw_count <- sum(idx_l_raw, na.rm = TRUE)
+      
+      # Get Clean points intersecting the cone
+      idx_g_clean <- get_voxels_in_cone(diff_vox_clean)
+      idx_l_clean <- get_voxels_in_cone(lost_vox_clean)
+      g_clean_count <- sum(idx_g_clean, na.rm = TRUE)
+      l_clean_count <- sum(idx_l_clean, na.rm = TRUE)
+      
+      # Extract actual clean points to count clusters
+      diff_cone_clean_pts <- diff_vox_clean[which(idx_g_clean), ]
+      lost_cone_clean_pts <- lost_vox_clean[which(idx_l_clean), ]
+      
+      g_clusters <- 0
+      l_clusters <- 0
+      
+      # Note: minPts = 1 is used here to just group points into distinct patches
+      # without discarding points that already survived the global clean filter.
+      if (g_clean_count > 0) {
+        cl_g <- dbscan::dbscan(diff_cone_clean_pts[, 1:3], eps = eps_val, minPts = 1)
+        g_clusters <- max(cl_g$cluster)
+      }
+      if (l_clean_count > 0) {
+        cl_l <- dbscan::dbscan(lost_cone_clean_pts[, 1:3], eps = eps_val, minPts = 1)
+        l_clusters <- max(cl_l$cluster)
+      }
+      
+      # Store for visualization if it matches the chosen height
+      if (cone_base_z[j] == visual_cone_base_height) {
+        visual_growth_in_cone <- diff_cone_clean_pts
+        visual_loss_in_cone   <- lost_cone_clean_pts
+      }
+      
+      # Format Metrics cleanly (e.g., "3,125 / 3,166 (98.7%)")
+      g_pct <- ifelse(g_raw_count > 0, round((g_clean_count / g_raw_count) * 100, 1), 0)
+      l_pct <- ifelse(l_raw_count > 0, round((l_clean_count / l_raw_count) * 100, 1), 0)
+      
+      g_combined <- sprintf("%s / %s (%.1f%%)", format(g_clean_count, big.mark=","), format(g_raw_count, big.mark=","), g_pct)
+      l_combined <- sprintf("%s / %s (%.1f%%)", format(l_clean_count, big.mark=","), format(l_raw_count, big.mark=","), l_pct)
+      
+      # Append to summary table
+      cone_growth_loss_summary <- rbind(cone_growth_loss_summary, data.frame(
+        Cone_Base_Height = sprintf("%.2f m", cone_base_z[j]),
+        Growth_Combined = g_combined,
+        Growth_Clusters = g_clusters,
+        Loss_Combined = l_combined,
+        Loss_Clusters = l_clusters,
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Rename columns and print the markdown table
+    colnames(cone_growth_loss_summary) <- c("Cone Base Height", "Growth (Clean / Raw)", "Growth Clusters", "Loss (Clean / Raw)", "Loss Clusters")
+    print(knitr::kable(cone_growth_loss_summary, align = c("c", "r", "c", "r", "c")))
+    cat("\n\n")
+    
+  } else {
+    cat("_Selected comparison parameters not found. Please ensure combos generated this resolution._\n\n")
+  }
+}
+```
+
+```{r voxR-comparison-year-cone-visualisation, results='asis', message=FALSE, warning=FALSE}
+if (toggle_cone_growth_loss_plot && has_prev_year_comparison_file && exists("visual_growth_in_cone")) {
+  rgl::clear3d()
+  
+  # 1. Base point cloud (current year context)
+  # Subsampling is applied to prevent WebGL memory limits (blank outputs) and extreme lag
+  if (exists("t0_comp") && nrow(t0_comp) > 0) {
+    n_pts <- nrow(t0_comp)
+    if (n_pts > 50000) {
+      bg_pts <- t0_comp[sample(n_pts, 50000), ]
+    } else {
+      bg_pts <- t0_comp
+    }
+    points3d(bg_pts$X, bg_pts$Y, bg_pts$Z, col="grey80", size=1)
+  }
+  
+  # 2. Overall structural change context
+  if (nrow(visual_diff_vox_cone) > 0) {
+    points3d(visual_diff_vox_cone$X, visual_diff_vox_cone$Y, visual_diff_vox_cone$Z, col="lightgreen", size=2, alpha=0.3)
+  }
+  if (nrow(visual_lost_vox_cone) > 0) {
+    points3d(visual_lost_vox_cone$X, visual_lost_vox_cone$Y, visual_lost_vox_cone$Z, col="pink", size=2, alpha=0.3)
+  }
+  
+  # 3. Growth/Loss directly intersecting the cone
+  if (!is.null(visual_growth_in_cone) && nrow(visual_growth_in_cone) > 0) {
+    points3d(visual_growth_in_cone$X, visual_growth_in_cone$Y, visual_growth_in_cone$Z, col="green", size=5)
+  }
+  if (!is.null(visual_loss_in_cone) && nrow(visual_loss_in_cone) > 0) {
+    points3d(visual_loss_in_cone$X, visual_loss_in_cone$Y, visual_loss_in_cone$Z, col="red", size=5)
+  }
+  
+  # 4. Cone Wireframe
+  theta <- seq(0, 2*pi, length.out=64)
+  cone_x <- (cone_radius * cos(theta)) + cone_tip_x
+  cone_y <- (cone_radius * sin(theta)) + cone_tip_y
+  
+  lines3d(c(cone_x, cone_x[1]), c(cone_y, cone_y[1]), rep(visual_cone_base_height, 65), col="blue", lwd=3)
+  
+  for (i in seq(1, 64, by=2)) {
+    lines3d(c(cone_x[i], cone_tip_x),
+            c(cone_y[i], cone_tip_y),
+            c(visual_cone_base_height, visual_cone_tip_z),
+            col="blue", lwd=3)
+  }
+  
+  spheres3d(cone_tip_x, cone_tip_y, visual_cone_tip_z, radius=0.12, col="yellow")
+  
+  # 5. Output rendering
+  if (keep_conical3Dplot) {
+    widget <- htmltools::div(
+      htmltools::tags$h4("Growth (Green) & Loss (Red) inside Conical Clearance Zone at base height ", visual_cone_base_height, " m"),
+      rgl::rglwidget(width = 500, height = 500)
+    )
+    rgl::clear3d()
+    widget
+  
+  } else {
+    plot3d_file <- tempfile(fileext = ".png")
+    rgl::snapshot3d(plot3d_file, width = 500, height = 500)
+    rgl::clear3d()
+  
+    htmltools::div(
+      htmltools::tags$h4("Growth (Green) & Loss (Red) inside Conical Clearance Zone at base height ", visual_cone_base_height, " m"),
+      htmltools::tags$img(src = knitr::image_uri(plot3d_file))
+    )
+  }
+}
+```
+
+### ADTree QSM Model and Metrics
+
+AdTree Biomass: `r AdTree_Biomass` kg <br>
+AdTree DBH: `r AdTree_DBH` cm <br>
+AdTree Total Tree Length: `r AdTree_Total_Tree_Length` m <br>
+
+```{r adtree_plot-obj, results='asis', message=FALSE, warning=FALSE}
+if (toggle_adtree_plot) {
+  # Construct the path to the specific OBJ file
+  base_name <- tools::file_path_sans_ext(current_file_name)
+  obj_filename <- paste0(base_name, "_branches.obj")
+  obj_file <- file.path(output_dir_for_archi_qsm_files, obj_filename)
+    
+  simplify_ratio <- 0.3  # Keep 30% of vertices
+  n_vertices <- nrow(obj_data$vb)
+  keep_indices <- sample(1:n_vertices, size = floor(n_vertices * simplify_ratio))
+  obj_data$vb <- obj_data$vb[, keep_indices]
+  
+  if (!is.null(obj_data$it)) {
+    # Filter faces that reference removed vertices
+    valid_faces <- apply(obj_data$it, 2, function(face) all(face %in% keep_indices))
+    obj_data$it <- obj_data$it[, valid_faces]
+  }
+  if (keep_adtree3Dplot) {
+    # PLOT 1: QSM Model Only
+    rgl::clear3d()
+    shade3d(obj_data, color = "green")
+    aspect3d("iso")
+    axes3d()
+    bg3d("white")
+    widget1 <- rgl::rglwidget(width = 500, height = 500)
+    
+    htmltools::div(style = "display: flex; justify-content: space-around;",
+      htmltools::div(style = "flex: 1; text-align: center;",
+        htmltools::h4("QSM Model Only"),
+        widget1
+      ),
+    )
+  } else {
+    # ---- STATIC PNG SCREENSHOT OUTPUT ----
+    plot1_file <- file.path(output_dir_for_archi_qsm_files, "qsm_model_only.png")
+    plot2_file <- file.path(output_dir_for_archi_qsm_files, "qsm_model_with_pc.png")
+
+    # Plot 1: QSM Model Only
+    rgl::clear3d()
+    shade3d(obj_data, color = "green")
+    aspect3d("iso"); axes3d(); bg3d("white")
+    rgl::snapshot3d(filename = plot1_file, width = 900, height = 900)
+
+    # Plot 2: QSM Model with Point Cloud Overlay (using downsampled data)
+    rgl::clear3d()
+    shade3d(obj_data, color = "green")
+    points3d(XYZ$X, XYZ$Y, XYZ$Z, 
+             color = "red", size = 2)
+    aspect3d("iso"); axes3d(); bg3d("white")
+    rgl::snapshot3d(filename = plot2_file, width = 900, height = 900)
+
+    # Combine and display both images side-by-side
+    htmltools::div(
+      style = "display: flex; justify-content: space-around; align-items: flex-start;",
+      htmltools::div(
+        style = "flex: 1; text-align: center;",
+        htmltools::h4("QSM Model Only"),
+        htmltools::img(src = knitr::image_uri(plot1_file), style = "max-width: 100%; height: auto;")
+      ),
+      htmltools::div(
+        style = "flex: 1; text-align: center;",
+        htmltools::h4("QSM Model with Point Cloud Overlay"),
+        htmltools::img(src = knitr::image_uri(plot2_file), style = "max-width: 100%; height: auto;")
+      )
+    )
+  }
+}
+```
+
+```{r archi-qsm-plots2, fig.show='hold', out.width='50%', message=FALSE, warning=FALSE}
+if (toggle_archi_qsm_plots && generate_archi_qsm) {
+  plots <- list()
+  ok <- TRUE
+  
+  tryCatch({
+    R.utils::withTimeout({
+      
+      # 1️⃣ Point cloud
+      plot1_file <- tempfile(fileext = ".png")
+      aRchi::plot(My_aRchi, skeleton = TRUE, leaves = FALSE, 
+                  color = "branching_order", show_point_cloud=TRUE, bg="white")
+      rgl::snapshot3d(plot1_file, width = 500, height = 500)
+      rgl::clear3d()
+
+      # 2️⃣ Simple skeleton
+      plot2_file <- tempfile(fileext = ".png")
+      aRchi::plot(My_aRchi, skeleton = TRUE, leaves = FALSE, color = "branching_order", bg="white")
+      rgl::snapshot3d(plot2_file, width = 1500, height = 1500)
+      rgl::clear3d()
+
+      # 3️⃣ Skeleton + volume
+      plot3_file <- tempfile(fileext = ".png")
+      My_aRchi <- aRchi::add_radius(My_aRchi) 
+      aRchi::plot(My_aRchi, skeleton = FALSE, leaves = FALSE, color = "chocolate4", bg="white")
+      rgl::snapshot3d(plot3_file, width = 1000, height = 1000)
+      rgl::clear3d()
+
+      # 4️⃣ Full tree (High computational cost)
+      plot4_file <- tempfile(fileext = ".png")
+      My_aRchi <- aRchi::segment_annual_shoots(My_aRchi, tree_age = 13)
+      My_aRchi <- aRchi::add_physiological_ages(My_aRchi)
+      My_aRchi <- aRchi::add_leaves(My_aRchi)
+      aRchi::plot(My_aRchi, leaves = TRUE, bg = "white", color = "chocolate4")
+      rgl::snapshot3d(plot4_file, width = 2000, height = 2000)
+      rgl::clear3d()
+      
+      # 5️⃣ Retained vs Discarded
+      plot5_file <- tempfile(fileext = ".png")
+      
+      # Generate color vector based on the updated global object
+      # Brown for Retained, Grey for Discarded
+      color_vec <- ifelse(My_aRchi@QSM$Classification == "Retained", "chocolate4", "grey90")
+      
+      # Pass the VECTOR directly to color
+      aRchi::plot(My_aRchi, skeleton = FALSE, leaves = FALSE, 
+                  color = color_vec, bg = "white")
+      
+      rgl::snapshot3d(plot5_file, width = 1500, height = 1500)
+      rgl::clear3d()
+      
+      knitr::include_graphics(plot5_file) # Include all files here
+      
+    }, timeout = 300, onTimeout = "error")
+  }, error = function(e) {
+    message("Plotting error: ", e$message)
+  })
+}
+```
+
+### Elevation Angle Probability Density
+
+```{r archi-qsm-branch-angle-probability-den, fig.show='hold', out.width='50%', message=FALSE, warning=FALSE}
+if (toggle_elevation_angle_plot && generate_archi_qsm && !is.null(My_aRchi)) {
+
+    qsm_dt <- My_aRchi@QSM
+
+    # Filter to get ONE value per Axis (Crucial for scientific accuracy)
+    axis_data <- unique(qsm_dt[, .(axis_ID, zenith_angle, Classification)])
+
+    p <- ggplot(axis_data, aes(x = zenith_angle, fill = Classification)) +
+      geom_density(alpha = 0.6, color = "black", linewidth = 0.3) +
+      scale_fill_manual(values = c("Retained" = "chocolate4", "Discarded" = "grey90")) +
+      scale_x_continuous(name = "Elevation angle (°)", limits = c(0, 180), expand = c(0,0)) +
+      scale_y_continuous(name = "Probability density", expand = c(0,0)) +
+      theme_classic() +
+      theme(legend.position = c(0.8, 0.8)) +
+      ggtitle("Distribution of Structuring vs Discarded Axes(branches >1m with branch order 0-2 are kept)")
+
+    print(p)
+}
+```
+
+### Technical Details
+
+```{r technical-details}
+if (toggle_technical_details) {
+  cat("- File processed:", current_file_name, "\n")
+  cat("- Bloc Number:", bloc_nb, "\n")
+  cat("- Tree ID:", tree_id, "\n")
+  cat("- Tree Species:", tree_type, "\n")
+  cat("- Treatment:", tree_treatment, "\n")
+  cat("- Total points in cloud:", nrow(XYZ), "\n")
+  cat("- Voxelisation resolution: 2.5cm, 5cm, 10cm & 20cm")
+  cat("- Total voxels 2.5cm:", total_voxel_count[1], "voxels\n")
+  cat("- Total voxels 5cm:", total_voxel_count[2], "voxels\n")
+  cat("- Total voxels 10cm:", total_voxel_count[3], "voxels\n")
+  cat("- Total voxels 20cm:", total_voxel_count[4], "voxels\n")
+  cat("- Wood density:", densite_bois, "kg/m³")
+  cat("- Processing date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+  
+  # No longer used for now
+  # cat("- Archi QSM cleaning threshold:", aRchi_QSM_clean_treshold, "\n")
+}
+```
+
+```{r save-to-csv, include=FALSE}
+# Calculate nearest neighbors to get the Fitting Ratios for tree comparisons between years
+nn_dists <- dbscan::kNN(x = t0_comp[, 1:3], query = t1_comp[, 1:3], k = 1)$dist
+
+tree_name <- gsub("\\.laz$", "", current_file_name)
+report_name <- paste0("report_", tree_name, ".html")
+
+safe <- function(x) if (length(x) == 0) NA else x
+
+tree_summary <- data.frame(
+  Bloc_Nb = safe(bloc_nb),
+  Tree_ID = safe(tree_id),
+  Tree_Type = safe(tree_type),
+  Tree = safe(tree_name),
+  Treatment = safe(tree_treatment),
+  Height_m = safe(rounded_height),
+  Total_pixel = nrow(XYZ),
+  
+  voxR_Biomass_kg = safe(voxR_biomass),
+  Archi_Biomass_kg = safe(Rounded_Archi_Biomass),
+  AdTree_Biomass_kg = safe(AdTree_Biomass),
+  Trunk_Height_m = safe(trunk_height),
+  Crown_Height_m = safe(crown_height),
+  Crown_Diam_m = safe(voxR_crown_diam),
+  Proj_Area_m2 = safe(voxR_proj_area),
+  AdTree_Total_Tree_Length_m = safe(AdTree_Total_Tree_Length),
+  AdTree_DBH_cm = safe(AdTree_DBH),
+  ItsME_DBH_cm = safe(ItsME_DBH),
+  voxR_DBH_cm = safe(voxR_DBH),
+  
+  Alignement_RSME = safe(alignment_rmse),
+  
+  Nb_Voxel_3phase__in_crit_pruning_zone_6m_2_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[1, 1]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_7m_2_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[1, 2]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_8m_2_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[1, 3]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_9m_2_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[1, 4]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_10m_2_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[1, 5]),
+
+  Nb_Voxel_3phase__in_crit_pruning_zone_6m_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[2, 1]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_7m_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[2, 2]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_8m_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[2, 3]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_9m_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[2, 4]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_10m_5cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[2, 5]),
+
+  Nb_Voxel_3phase__in_crit_pruning_zone_6m_10cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[3, 1]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_7m_10cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[3, 2]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_8m_10cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[3, 3]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_9m_10cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[3, 4]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_10m_10cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[3, 5]),
+
+  Nb_Voxel_3phase__in_crit_pruning_zone_6m_20cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[4, 1]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_7m_20cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[4, 2]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_8m_20cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[4, 3]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_9m_20cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[4, 4]),
+  Nb_Voxel_3phase__in_crit_pruning_zone_10m_20cm = safe(nb_voxels_3phase_in_crit_pruning_zone_at_height[4, 5]),
+
+  Nb_Voxel_1phase__in_crit_pruning_zone_6m_2_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[1, 1]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_7m_2_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[1, 2]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_8m_2_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[1, 3]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_9m_2_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[1, 4]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_10m_2_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[1, 5]),
+
+  Nb_Voxel_1phase__in_crit_pruning_zone_6m_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[2, 1]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_7m_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[2, 2]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_8m_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[2, 3]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_9m_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[2, 4]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_10m_5cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[2, 5]),
+
+  Nb_Voxel_1phase__in_crit_pruning_zone_6m_10cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[3, 1]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_7m_10cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[3, 2]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_8m_10cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[3, 3]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_9m_10cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[3, 4]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_10m_10cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[3, 5]),
+  
+  Nb_Voxel_1phase__in_crit_pruning_zone_6m_20cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[4, 1]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_7m_20cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[4, 2]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_8m_20cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[4, 3]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_9m_20cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[4, 4]),
+  Nb_Voxel_1phase__in_crit_pruning_zone_10m_20cm = safe(nb_voxels_1phase_in_crit_pruning_zone_at_height[4, 5]),
+
+  
+  Nb_Voxel_in_cone_6m_2_5cm = safe(nb_voxels_in_cone_at_height[1, 1]),
+  Nb_Voxel_in_cone_7m_2_5cm = safe(nb_voxels_in_cone_at_height[1, 2]),
+  Nb_Voxel_in_cone_8m_2_5cm = safe(nb_voxels_in_cone_at_height[1, 3]),
+  Nb_Voxel_in_cone_9m_2_5cm = safe(nb_voxels_in_cone_at_height[1, 4]),
+  Nb_Voxel_in_cone_10m_2_5cm = safe(nb_voxels_in_cone_at_height[1, 5]),
+
+  Nb_Voxel_in_cone_6m_5cm = safe(nb_voxels_in_cone_at_height[2, 1]),
+  Nb_Voxel_in_cone_7m_5cm = safe(nb_voxels_in_cone_at_height[2, 2]),
+  Nb_Voxel_in_cone_8m_5cm = safe(nb_voxels_in_cone_at_height[2, 3]),
+  Nb_Voxel_in_cone_9m_5cm = safe(nb_voxels_in_cone_at_height[2, 4]),
+  Nb_Voxel_in_cone_10m_5cm = safe(nb_voxels_in_cone_at_height[2, 5]),
+
+  Nb_Voxel_in_cone_6m_10cm = safe(nb_voxels_in_cone_at_height[3, 1]),
+  Nb_Voxel_in_cone_7m_10cm = safe(nb_voxels_in_cone_at_height[3, 2]),
+  Nb_Voxel_in_cone_8m_10cm = safe(nb_voxels_in_cone_at_height[3, 3]),
+  Nb_Voxel_in_cone_9m_10cm = safe(nb_voxels_in_cone_at_height[3, 4]),
+  Nb_Voxel_in_cone_10m_10cm = safe(nb_voxels_in_cone_at_height[3, 5]),
+
+  Nb_Voxel_in_cone_6m_20cm = safe(nb_voxels_in_cone_at_height[4, 1]),
+  Nb_Voxel_in_cone_7m_20cm = safe(nb_voxels_in_cone_at_height[4, 2]),
+  Nb_Voxel_in_cone_8m_20cm = safe(nb_voxels_in_cone_at_height[4, 3]),
+  Nb_Voxel_in_cone_9m_20cm = safe(nb_voxels_in_cone_at_height[4, 4]),
+  Nb_Voxel_in_cone_10m_20cm = safe(nb_voxels_in_cone_at_height[4, 5]),
+  
+  Spherical_nb_voxels_6m_2_5cm = safe(spherical_voxel_counts[1, 1]),
+  Spherical_nb_voxels_7m_2_5cm = safe(spherical_voxel_counts[1, 2]),
+  Spherical_nb_voxels_8m_2_5cm = safe(spherical_voxel_counts[1, 3]),
+  Spherical_nb_voxels_9m_2_5cm = safe(spherical_voxel_counts[1, 4]),
+  Spherical_nb_voxels_10m_2_5cm = safe(spherical_voxel_counts[1, 5]),
+
+  Spherical_nb_voxels_6m_5cm = safe(spherical_voxel_counts[2, 1]),
+  Spherical_nb_voxels_7m_5cm = safe(spherical_voxel_counts[2, 2]),
+  Spherical_nb_voxels_8m_5cm = safe(spherical_voxel_counts[2, 3]),
+  Spherical_nb_voxels_9m_5cm = safe(spherical_voxel_counts[2, 4]),
+  Spherical_nb_voxels_10m_5cm = safe(spherical_voxel_counts[2, 5]),
+
+  Spherical_nb_voxels_6m_10cm = safe(spherical_voxel_counts[3, 1]),
+  Spherical_nb_voxels_7m_10cm = safe(spherical_voxel_counts[3, 2]),
+  Spherical_nb_voxels_8m_10cm = safe(spherical_voxel_counts[3, 3]),
+  Spherical_nb_voxels_9m_10cm = safe(spherical_voxel_counts[3, 4]),
+  Spherical_nb_voxels_10m_10cm = safe(spherical_voxel_counts[3, 5]),
+
+  Spherical_nb_voxels_6m_20cm = safe(spherical_voxel_counts[4, 1]),
+  Spherical_nb_voxels_7m_20cm = safe(spherical_voxel_counts[4, 2]),
+  Spherical_nb_voxels_8m_20cm = safe(spherical_voxel_counts[4, 3]),
+  Spherical_nb_voxels_9m_20cm = safe(spherical_voxel_counts[4, 4]),
+  Spherical_nb_voxels_10m_20cm = safe(spherical_voxel_counts[4, 5]),
+
+  
+  Growth_Voxel_5cm_res_5cm_dist = safe(comp_results[["res_5cm_dist_5cm"]]$n_growth_clean),
+  Growth_Voxel_5cm_res_10cm_dist = safe(comp_results[["res_5cm_dist_10cm"]]$n_growth_clean),
+  Growth_Voxel_5cm_res_15cm_dist = safe(comp_results[["res_5cm_dist_15cm"]]$n_growth_clean),
+  Growth_Voxel_10cm_res_5cm_dist = safe(comp_results[["res_10cm_dist_5cm"]]$n_growth_clean),
+  Growth_Voxel_10cm_res_10cm_dist = safe(comp_results[["res_10cm_dist_10cm"]]$n_growth_clean),
+  Growth_Voxel_10cm_res_15cm_dist = safe(comp_results[["res_10cm_dist_15cm"]]$n_growth_clean),
+  Loss_Voxel_5cm_res_5cm_dist = safe(comp_results[["res_5cm_dist_5cm"]]$n_loss_clean),
+  Loss_Voxel_5cm_res_10cm_dist = safe(comp_results[["res_5cm_dist_10cm"]]$n_loss_clean),
+  Loss_Voxel_5cm_res_15cm_dist = safe(comp_results[["res_5cm_dist_15cm"]]$n_loss_clean),
+  Loss_Voxel_10cm_res_5cm_dist = safe(comp_results[["res_10cm_dist_5cm"]]$n_loss_clean),
+  Loss_Voxel_10cm_res_10cm_dist = safe(comp_results[["res_10cm_dist_10cm"]]$n_loss_clean),
+  Loss_Voxel_10cm_res_15cm_dist = safe(comp_results[["res_10cm_dist_15cm"]]$n_loss_clean),
+  
+  Growth_Pct_5cm_res_5cm_dist = safe((comp_results[["res_5cm_dist_5cm"]]$n_growth_clean / comp_results[["res_5cm_dist_5cm"]]$n_v0) * 100),
+  Growth_Pct_5cm_res_10cm_dist = safe((comp_results[["res_5cm_dist_10cm"]]$n_growth_clean / comp_results[["res_5cm_dist_10cm"]]$n_v0) * 100),
+  Growth_Pct_5cm_res_15cm_dist = safe((comp_results[["res_5cm_dist_15cm"]]$n_growth_clean / comp_results[["res_5cm_dist_15cm"]]$n_v0) * 100),
+  Growth_Pct_10cm_res_5cm_dist = safe((comp_results[["res_10cm_dist_5cm"]]$n_growth_clean / comp_results[["res_10cm_dist_5cm"]]$n_v0) * 100),
+  Growth_Pct_10cm_res_10cm_dist = safe((comp_results[["res_10cm_dist_10cm"]]$n_growth_clean / comp_results[["res_10cm_dist_10cm"]]$n_v0) * 100),
+  Growth_Pct_10cm_res_15cm_dist = safe((comp_results[["res_10cm_dist_15cm"]]$n_growth_clean / comp_results[["res_10cm_dist_15cm"]]$n_v0) * 100),
+  
+  Loss_Pct_5cm_res_5cm_dist = safe((comp_results[["res_5cm_dist_5cm"]]$n_loss_clean / comp_results[["res_5cm_dist_5cm"]]$n_v1) * 100),
+  Loss_Pct_5cm_res_10cm_dist = safe((comp_results[["res_5cm_dist_10cm"]]$n_loss_clean / comp_results[["res_5cm_dist_10cm"]]$n_v1) * 100),
+  Loss_Pct_5cm_res_15cm_dist = safe((comp_results[["res_5cm_dist_15cm"]]$n_loss_clean / comp_results[["res_5cm_dist_15cm"]]$n_v1) * 100),
+  Loss_Pct_10cm_res_5cm_dist = safe((comp_results[["res_10cm_dist_5cm"]]$n_loss_clean / comp_results[["res_10cm_dist_5cm"]]$n_v1) * 100),
+  Loss_Pct_10cm_res_10cm_dist = safe((comp_results[["res_10cm_dist_10cm"]]$n_loss_clean / comp_results[["res_10cm_dist_10cm"]]$n_v1) * 100),
+  Loss_Pct_10cm_res_15cm_dist = safe((comp_results[["res_10cm_dist_15cm"]]$n_loss_clean / comp_results[["res_10cm_dist_15cm"]]$n_v1) * 100),
+  
+  Growth_Clusters_5cm_res_5cm_dist = safe(comp_results[["res_5cm_dist_5cm"]]$growth_clusters),
+  Growth_Clusters_5cm_res_10cm_dist = safe(comp_results[["res_5cm_dist_10cm"]]$growth_clusters),
+  Growth_Clusters_5cm_res_15cm_dist = safe(comp_results[["res_5cm_dist_15cm"]]$growth_clusters),
+  Growth_Clusters_10cm_res_5cm_dist = safe(comp_results[["res_10cm_dist_5cm"]]$growth_clusters),
+  Growth_Clusters_10cm_res_10cm_dist = safe(comp_results[["res_10cm_dist_10cm"]]$growth_clusters),
+  Growth_Clusters_10cm_res_15cm_dist = safe(comp_results[["res_10cm_dist_15cm"]]$growth_clusters),
+  
+  Loss_Clusters_5cm_res_5cm_dist = safe(comp_results[["res_5cm_dist_5cm"]]$loss_clusters),
+  Loss_Clusters_5cm_res_10cm_dist = safe(comp_results[["res_5cm_dist_10cm"]]$loss_clusters),
+  Loss_Clusters_5cm_res_15cm_dist = safe(comp_results[["res_5cm_dist_15cm"]]$loss_clusters),
+  Loss_Clusters_10cm_res_5cm_dist = safe(comp_results[["res_10cm_dist_5cm"]]$loss_clusters),
+  Loss_Clusters_10cm_res_10cm_dist = safe(comp_results[["res_10cm_dist_10cm"]]$loss_clusters),
+  Loss_Clusters_10cm_res_15cm_dist = safe(comp_results[["res_10cm_dist_15cm"]]$loss_clusters),
+  
+  Vox_Count_Prev_5cm = safe(comp_results[["res_5cm_dist_10cm"]]$n_v1),
+  Vox_Count_Curr_5cm = safe(comp_results[["res_5cm_dist_10cm"]]$n_v0),
+  Vox_Count_Prev_10cm = safe(comp_results[["res_10cm_dist_10cm"]]$n_v1),
+  Vox_Count_Curr_10cm = safe(comp_results[["res_10cm_dist_10cm"]]$n_v0),
+  
+  total_voxels_2_5cm = safe(total_voxel_count[1]),
+  total_voxels_5cm = safe(total_voxel_count[2]),
+  total_voxels_10cm = safe(total_voxel_count[3]),
+  total_voxels_20cm = safe(total_voxel_count[4]),
+  
+  Report_Link = safe(report_name),
+  stringsAsFactors = FALSE
+)
+
+# Convert voxels to volume
+res_m <- resolutions_cm / 100
+voxel_volume_m3 <- res_m^3
+crit_vol_for_each_res <- crit_voxels_for_each_res * voxel_volume_m3
+total_vol_for_each_res <- total_voxels_for_each_res * voxel_volume_m3
+names(crit_vol_for_each_res) <- paste0("Cone_Vol_", resolutions_cm)
+names(total_vol_for_each_res) <- paste0("Total_Vol_", resolutions_cm)
+tree_summary <- cbind(
+  tree_summary,
+  as.data.frame(as.list(crit_voxels_for_each_res)),    # Keeps your 13 Cone Counts
+  as.data.frame(as.list(crit_vol_for_each_res)),       # ADDS your 13 Cone Volumes
+  as.data.frame(as.list(total_voxels_for_each_res)),   # Keeps your 13 Total Counts
+  as.data.frame(as.list(total_vol_for_each_res))       # ADDS your 13 Total Volumes
+)
+ 
+csv_file <- paste0("tree_summary_bloc", bloc_nb, ".csv")
+
+if(file.exists(csv_file)) {
+  existing_data <- read.csv(csv_file, stringsAsFactors = FALSE)
+  existing_data <- existing_data[existing_data$Tree != tree_name, ]
+  updated_data <- rbind(existing_data, tree_summary)
+} else {
+  updated_data <- tree_summary
+}
+
+write.csv(updated_data, csv_file, row.names = FALSE)
+```

@@ -1,0 +1,205 @@
+---
+title: "LiDAR Tree Analysis - Saint Bruno"
+author: "Loïc Charlebois"
+date: "`r Sys.Date()`"
+params:
+  csv_file: ""
+  bloc_nb: ""
+  month: ""
+  year: ""
+output: 
+  html_document:
+    theme: flatly
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(openxlsx)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(corrplot)
+library(gridExtra)
+
+summary_csv_name <- params$csv_file
+bloc_number <- params$bloc_nb
+month <- params$month
+year <- params$year
+
+base_dir <- "/Users/loiccv/Documents/UQAM/RStudio_1st_project/Markdown/"
+setwd(base_dir)
+
+# xl_path = '/Users/loiccv/Documents/UQAM/RStudio_1st_project/Markdown/Saint_Lambert_2025.xlsx'
+xl_path_2025 = "/Users/loiccv/Documents/UQAM/RStudio_1st_project/Markdown/Donnees2025_St-Bruno.xlsx"
+# xl_path_2024 = "/Users/loiccv/Documents/UQAM/RStudio_1st_project/Markdown/MesuresPrintemps_Ete2024.xlsx"
+
+excel_data_2025 <- read.xlsx(xl_path_2025)
+# excel_data_2024 <- read.xlsx(xl_path_2024)
+
+summary_data <- read.csv(summary_csv_name, stringsAsFactors = FALSE)
+
+# summary_data <- merge(summary_data, 
+#                      excel_data[c("ID", "Hauteur-Mai2025.(cm)", "DHP-MAI.2025.(cm)")],
+#                      by.x = "Tree_ID", by.y = "ID", all.x = TRUE)
+for(i in 1:nrow(summary_data)) {
+ tree_id <- summary_data$Tree_ID[i]
+ excel_row_2025 <- excel_data_2025[excel_data_2025$New.ID == tree_id, ]
+ if (year == 2025) {
+   summary_data$Excel_DBH_cm[i] <- excel_row_2025$`DHP.2025.(cm)`[1]
+   summary_data$Excel_Height_cm[i] <- excel_row_2025$`Hauteur.2025.(cm)`[1]
+   summary_data$Excel_Height_m[i] <- round(as.numeric(summary_data$Excel_Height_cm[i]) / 100, 2)
+  } else if (year == 2024) {
+   summary_data$Excel_DBH_cm[i] <- "TODO"
+   summary_data$Excel_Height_cm[i] <- "TODO"
+  }
+}
+
+summary_data$Report_Link <- paste0('<a href="', summary_data$Report_Link, '" target="_blank">📊 View</a>')
+
+# summary_data$Measured_Height_m <- round(as.numeric(summary_data$`Hauteur-Mai2025.(cm)`) / 100, 2)
+                                        
+#Format columns
+summary_data$Height_m <- paste(summary_data$Height_m, "m")
+summary_data$Excel_Height_m <- paste(summary_data$Excel_Height_m, "m")
+summary_data$DBH_cm <- paste(summary_data$AdTree_DBH_cm, "cm")
+summary_data$Excel_DBH_cm <- paste(summary_data$Excel_DBH_cm, "cm")
+summary_data$Biomass_kg <- paste(summary_data$Archi_Biomass_kg, "kg")
+summary_data$Conical_ratio_6m <- paste(summary_data$Conical_density_ratio_6m, "%")
+
+# Select and rename columns
+display_data <- summary_data[c("Tree_ID", "Tree_Type", "Bloc_Nb","Treatment", "Height_m", "Excel_Height_m", "DBH_cm", "Excel_DBH_cm", "Biomass_kg", "Conical_ratio_6m", "Report_Link")]
+names(display_data) <- c("Tree ID", "Species", "Bloc", "Treatment", "LiDAR Height", "Measured Height", "AdTree DBH", "Measured DBH", "Archi Biomass","Conical Ratio 6m", "Report")
+```
+
+## Overview for `r month` `r year` bloc `r bloc_number` 
+
+This dashboard provides access to individual tree analysis reports generated from LiDAR point cloud data.
+
+### Tree Analysis Results
+
+```{r summary-table}
+# Calculate percentage differences
+height_lidar <- as.numeric(gsub("m", "", summary_data$Height_m))
+height_measured <- as.numeric(gsub("m", "", summary_data$Excel_Height_m))
+dbh_lidar <- as.numeric(gsub("cm", "", summary_data$DBH_cm))
+dbh_measured <- as.numeric(gsub("cm", "", summary_data$Excel_DBH_cm))
+
+summary_data$Height_Diff_Pct <- round(((height_lidar - height_measured) / height_measured) * 100, 1)
+summary_data$DBH_Diff_Pct <- round(((dbh_lidar - dbh_measured) / dbh_measured) * 100, 1)
+
+display_data$`Height Diff %` <- paste0(summary_data$Height_Diff_Pct, "%")
+display_data$`DBH Diff %` <- paste0(summary_data$DBH_Diff_Pct, "%")
+
+# Create color function for conditional formatting
+color_function <- JS(
+  "function(value, type, row, meta) {",
+  "  var num = Math.abs(parseFloat(value.replace('%', '')));",
+  "  if (isNaN(num)) return value;",
+  "  var intensity = Math.round((num / 50) * 255);", 
+  "  if (intensity > 255) intensity = 255;",
+  "  var red = intensity;",
+  "  var green = 255 - intensity;",
+  "  return '<span style=\"background-color: rgb(' + red + ',' + green + ',50); padding: 2px 4px; border-radius: 3px;\">' + value + '</span>';",
+  "}"
+)
+
+DT::datatable(
+  display_data,
+  rownames = FALSE,
+  escape   = FALSE,
+  options = list(
+    pageLength = 25,
+    autoWidth  = TRUE,
+    order      = list(list(0, 'asc')),
+    columnDefs = list(
+      list(targets = c(10, 11), render = color_function)  # Height Diff % and DBH Diff % columns
+    )
+  )
+)  
+```
+
+```{r stats-summary}
+analysis_clean <- summary_data %>%
+  # strip units and convert to numeric
+  mutate(
+    LiDAR_Height_m    = as.numeric(sub(" m$",  "", Height_m)),
+    Measured_Height_m = as.numeric(sub(" m$",  "", Excel_Height_m)),
+    LiDAR_DBH_cm      = as.numeric(sub(" cm$", "", DBH_cm)),
+    Measured_DBH_cm   = as.numeric(sub(" cm$", "", Excel_DBH_cm))
+  ) %>%
+  # drop any rows missing key metrics
+  filter(
+    !is.na(LiDAR_Height_m),    !is.na(Measured_Height_m),
+    !is.na(LiDAR_DBH_cm),      !is.na(Measured_DBH_cm)
+  ) %>%
+  # compute differences
+  mutate(
+    Height_Diff_m = LiDAR_Height_m - Measured_Height_m,
+    DBH_Diff_cm   = LiDAR_DBH_cm   - Measured_DBH_cm
+  )
+```
+
+### Over/Under Estimation Analysis
+
+```{r estimation-analysis}
+n_trees   <- nrow(analysis_clean)
+height_over  <- sum(analysis_clean$Height_Diff_m > 0)
+height_under <- sum(analysis_clean$Height_Diff_m < 0)
+height_exact <- sum(analysis_clean$Height_Diff_m == 0)
+
+dbh_over     <- sum(analysis_clean$DBH_Diff_cm > 0)
+dbh_under    <- sum(analysis_clean$DBH_Diff_cm < 0)
+dbh_exact    <- sum(analysis_clean$DBH_Diff_cm == 0)
+
+estimation_summary <- data.frame(
+  Measurement = rep(c("Height","DBH"), each = 3),
+  Category    = rep(c("Over‑estimated","Under‑estimated","Exact"), 2),
+  Count       = c(height_over, height_under, height_exact,
+                  dbh_over,    dbh_under,    dbh_exact),
+  Percentage  = round(c(
+    height_over/n_trees*100, height_under/n_trees*100, height_exact/n_trees*100,
+    dbh_over/n_trees*100,    dbh_under/n_trees*100,    dbh_exact/n_trees*100
+  ), 1)
+)
+
+kable(estimation_summary, caption = "LiDAR Over/Under Estimation Analysis")
+```
+
+## Visualization Analysis
+
+### Height and DBH Comparison
+
+```{r height-plots, fig.width=12, fig.height=6}
+
+# Difference plot for height
+p1 <- ggplot(analysis_clean, aes(x = Measured_Height_m, y = Height_Diff_m)) +
+  geom_point(alpha = 0.7, color = "coral", size = 2) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", se = TRUE, color = "darkblue") +
+  labs(title = "Height Difference (LiDAR - Measured)",
+       x = "Measured Height (m)",
+       y = "Height Difference (m)") +
+  theme_minimal()
+
+p2 <- ggplot(analysis_clean, aes(x = Measured_DBH_cm, y = DBH_Diff_cm)) +
+  geom_point(alpha = 0.7, color = "orange", size = 2) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", se = TRUE, color = "darkblue") +
+  labs(title = "DBH Difference (LiDAR - Measured)",
+       x = "Measured DBH (cm)",
+       y = "DBH Difference (cm)") +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+### Notes
+
+- **LiDAR Height**: Computed tree height using ITSMe algorithm
+- **LiDAR DBH**: Diameter at Breast Height from Adtree QSM DBH estimation
+- **Measured Height**: Field-measured height from Excel data
+- **Measured DBH**: Field-measured DBH from Excel data
+- **Biomass**: Tree biomass estimation based on Archi QSM that uses AdTree initial QSM generation
