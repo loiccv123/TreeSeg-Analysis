@@ -23,3 +23,6 @@ See docs/Instructions.docx for detailed setup and usage steps.
 - Loïc Charlebois (loiccv123@gmail.com)
 - Annick St-Denis (st-denis.annick@uqam.ca)
 
+# Project License
+- MIT license
+
