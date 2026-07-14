@@ -14,6 +14,7 @@ A sample block from the Saint-Bruno-de-Montarville plantation is provided to tes
 
 # Requirements
 Python 3.x (laspy, Open3D, scikit-learn, scipy)
+
 R (lidR, VoxR, ITSMe, AdTree QSM, ArchiQSM)
 
 # Full instructions
