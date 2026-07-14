@@ -19,6 +19,6 @@ R (lidR, VoxR, ITSMe, AdTree QSM, ArchiQSM)
 See docs/Instructions.docx for detailed setup and usage steps.
 
 # Authors
-- Loïc Charlebois
-- Annick St-Denis
+- Loïc Charlebois (loiccv123@gmail.com)
+- Annick St-Denis (st-denis.annick@uqam.ca)
 
